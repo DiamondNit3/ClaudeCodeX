@@ -17,6 +17,7 @@ This repository contains the first Rust implementation pass:
 - project instruction loading from `AGENTS.md`, `.ccx/AGENTS.md`, `CLAUDE.md`, and `.cursor/rules`
 - JSONL session logging and resume listing
 - MCP server config and tool visibility plumbing
+- animated terminal mascot for activity feedback
 - small, transparent base prompt
 
 Real OS-level sandboxing, full MCP invocation, subagents, and rich ratatui rendering are planned next.
@@ -48,6 +49,7 @@ Interactive slash commands include grouped session, model, workspace, and securi
 /permissions
 /session
 /compact
+/mascot
 /exit
 ```
 

@@ -7,8 +7,16 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use serde_json::Value;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::Duration;
+
+static MASCOT_TICK: AtomicUsize = AtomicUsize::new(0);
 
 pub struct HeaderInfo<'a> {
     pub version: &'a str,
@@ -33,7 +41,12 @@ pub struct FooterInfo<'a> {
 }
 
 pub fn render_header(info: HeaderInfo<'_>) {
-    println!("{}  {}", "ClaudeCodeX".bold(), info.version.dim());
+    println!(
+        "{}  {}  {}",
+        next_mascot_frame().red(),
+        "ClaudeCodeX".bold(),
+        info.version.dim()
+    );
     println!(
         "{}   {:<22} {}       {}",
         "model".dim(),
@@ -76,12 +89,12 @@ pub fn prompt() -> String {
     format!("{}", "ccx > ".cyan())
 }
 
-pub fn thinking() {
-    println!("{}", "thinking...".dim());
-}
-
 pub fn working_for_tool(call: &ToolCall) {
-    println!("{}", working_message(call).dim());
+    println!(
+        "{} {}",
+        next_mascot_frame().red(),
+        working_message(call).dim()
+    );
 }
 
 pub fn render_tool_call(call: &ToolCall) {
@@ -111,6 +124,7 @@ pub fn render_grouped_help() {
     println!("{}", "Session".bold());
     println!("  /session       show session path");
     println!("  /compact       append compaction marker");
+    println!("  /mascot        preview terminal mascot");
     println!("  /clear         clear screen");
     println!("  /exit          quit");
     println!();
@@ -148,9 +162,65 @@ pub fn render_diff(diff: &str) {
     }
 }
 
+pub struct ActivityAnimation {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+}
+
+impl ActivityAnimation {
+    pub fn start(label: &'static str) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_for_thread.load(Ordering::Relaxed) {
+                print!(
+                    "\r{} {}",
+                    next_mascot_frame().red(),
+                    format!("{label}...").dim()
+                );
+                let _ = io::stdout().flush();
+                thread::sleep(Duration::from_millis(140));
+            }
+        });
+
+        Self { stop, handle }
+    }
+
+    pub fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
+        print!("\r{}\r", " ".repeat(48));
+        let _ = io::stdout().flush();
+    }
+}
+
+pub fn render_mascot_preview() {
+    for _ in 0..16 {
+        print!("\r{} {}", next_mascot_frame().red(), "ClaudeCodeX".bold());
+        let _ = io::stdout().flush();
+        thread::sleep(Duration::from_millis(110));
+    }
+    println!();
+}
+
 pub fn clear_screen() -> Result<()> {
     execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
     Ok(())
+}
+
+fn next_mascot_frame() -> &'static str {
+    let tick = MASCOT_TICK.fetch_add(1, Ordering::Relaxed);
+    mascot_frame(tick)
+}
+
+fn mascot_frame(tick: usize) -> &'static str {
+    const FRAMES: [&str; 4] = [
+        r"\  (o_o)  /",
+        r" \ (o_o) / ",
+        r"  \(o_o)/  ",
+        r" / (o_o) \ ",
+    ];
+    FRAMES[tick % FRAMES.len()]
 }
 
 fn repo_name(path: &Path) -> String {
@@ -277,5 +347,18 @@ fn truncate(value: &str, max_chars: usize) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mascot_frames_keep_stable_width() {
+        let width = mascot_frame(0).chars().count();
+        for index in 1..8 {
+            assert_eq!(mascot_frame(index).chars().count(), width);
+        }
     }
 }

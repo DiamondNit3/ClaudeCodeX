@@ -287,17 +287,19 @@ async fn run_agent_turn(
         let provider = providers.get(&state.selected_provider)?;
         let mut messages = state.system_messages();
         messages.extend(state.transcript.clone());
-        if render_ui {
-            ui::thinking();
-        }
-        let response = provider
+        let animation = render_ui.then(|| ui::ActivityAnimation::start("thinking"));
+        let response_result = provider
             .generate(ModelRequest {
                 model: state.selected_model.clone(),
                 messages,
                 profile: state.model_profile(),
                 effort: state.current_effort(),
             })
-            .await?;
+            .await;
+        if let Some(animation) = animation {
+            animation.stop();
+        }
+        let response = response_result?;
 
         state.session.append(
             "assistant",
@@ -457,6 +459,10 @@ fn handle_slash_command(
                 },
             )?;
             println!("compaction marker appended");
+            Ok(false)
+        }
+        "/mascot" => {
+            ui::render_mascot_preview();
             Ok(false)
         }
         "/status" => {
