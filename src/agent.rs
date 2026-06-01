@@ -1,12 +1,15 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ModelProfile, ToolProtocol};
 use crate::context::ProjectContext;
+use crate::parser::parse_model_output;
 use crate::permissions::{PermissionEngine, PermissionProfile};
+use crate::preview::PreviewServer;
 use crate::providers::{MessageRole, ModelMessage, ModelRequest, ProviderRegistry};
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
 use crate::ui::{self, FooterInfo, HeaderInfo};
 use anyhow::{bail, Result};
 use serde::Serialize;
+use serde_json::json;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,6 +28,7 @@ pub async fn run_interactive(
     );
     let tools = ToolRegistry::new(workspace.clone(), permissions);
     let mut state = AgentState::new(config, context, session);
+    state.append_metadata()?;
 
     render_header(&state);
 
@@ -57,6 +61,51 @@ pub async fn run_interactive(
     Ok(())
 }
 
+pub async fn run_resume(
+    config: AppConfig,
+    providers: ProviderRegistry,
+    workspace: PathBuf,
+    session_id: String,
+) -> Result<()> {
+    let context = ProjectContext::load(&workspace)?;
+    let session = Session::open(&session_id)?;
+    let permissions = PermissionEngine::new(
+        PermissionProfile::parse(&config.permission_profile),
+        workspace.clone(),
+        true,
+    );
+    let tools = ToolRegistry::new(workspace, permissions);
+    let mut state = AgentState::new(config, context, session);
+    state.restore_transcript()?;
+
+    render_header(&state);
+    loop {
+        print!("{}", ui::prompt());
+        io::stdout().flush()?;
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 {
+            break;
+        }
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if input.starts_with('/') {
+            if handle_slash_command(input, &mut state, &providers)? {
+                break;
+            }
+            render_footer(&state);
+            continue;
+        }
+        let output = run_agent_turn(&mut state, &providers, &tools, input, true).await?;
+        if !output.trim().is_empty() {
+            println!("{output}");
+        }
+        render_footer(&state);
+    }
+    Ok(())
+}
+
 pub async fn run_exec(
     config: AppConfig,
     providers: ProviderRegistry,
@@ -72,6 +121,7 @@ pub async fn run_exec(
     );
     let tools = ToolRegistry::new(workspace, permissions);
     let mut state = AgentState::new(config, context, session);
+    state.append_metadata()?;
     let output = run_agent_turn(&mut state, &providers, &tools, &task, false).await?;
     println!("{output}");
     eprintln!("session: {}", state.session.path().display());
@@ -85,21 +135,91 @@ struct AgentState {
     selected_provider: String,
     selected_model: String,
     transcript: Vec<ModelMessage>,
+    preview: Option<PreviewServer>,
 }
 
 impl AgentState {
     fn new(config: AppConfig, context: ProjectContext, session: Session) -> Self {
+        let selected_provider = config
+            .model_profiles
+            .get(&config.default_model)
+            .and_then(|profile| profile.provider.clone())
+            .unwrap_or_else(|| config.default_provider.clone());
         Self {
-            selected_provider: config.default_provider.clone(),
+            selected_provider,
             selected_model: config.default_model.clone(),
             config,
             context,
             session,
             transcript: Vec::new(),
+            preview: None,
         }
     }
 
+    fn append_metadata(&self) -> Result<()> {
+        self.session.append(
+            "metadata",
+            json!({
+                "provider": &self.selected_provider,
+                "model": &self.selected_model,
+                "permission_profile": &self.config.permission_profile,
+                "workspace": &self.context.workspace,
+            }),
+        )
+    }
+
+    fn restore_transcript(&mut self) -> Result<()> {
+        for event in session::read_events(&self.session)? {
+            match event.kind.as_str() {
+                "metadata" => {
+                    if let Some(provider) = event.payload.get("provider").and_then(|v| v.as_str()) {
+                        self.selected_provider = provider.to_string();
+                    }
+                    if let Some(model) = event.payload.get("model").and_then(|v| v.as_str()) {
+                        self.selected_model = model.to_string();
+                    }
+                }
+                "user" => {
+                    if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
+                        self.transcript.push(ModelMessage {
+                            role: MessageRole::User,
+                            content: text.to_string(),
+                        });
+                    }
+                }
+                "assistant" => {
+                    if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
+                        self.transcript.push(ModelMessage {
+                            role: MessageRole::Assistant,
+                            content: text.to_string(),
+                        });
+                    }
+                }
+                "tool_result" => {
+                    self.transcript.push(ModelMessage {
+                        role: MessageRole::Tool,
+                        content: event.payload.to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn system_messages(&self) -> Vec<ModelMessage> {
+        let profile = self.model_profile();
+        if profile.tool_protocol == ToolProtocol::SimpleJson {
+            return vec![ModelMessage {
+                role: MessageRole::System,
+                content: local_model_prompt(
+                    &self.context.workspace.display().to_string(),
+                    &self.context.render_for_prompt(),
+                    profile.max_tool_prompt_size,
+                ),
+            }];
+        }
+
         vec![
             ModelMessage {
                 role: MessageRole::System,
@@ -118,6 +238,14 @@ impl AgentState {
                 content: ToolRegistry::tool_manifest().to_string(),
             },
         ]
+    }
+
+    fn model_profile(&self) -> ModelProfile {
+        self.config
+            .model_profiles
+            .get(&self.selected_model)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -148,6 +276,7 @@ async fn run_agent_turn(
             .generate(ModelRequest {
                 model: state.selected_model.clone(),
                 messages,
+                profile: state.model_profile(),
             })
             .await?;
 
@@ -162,21 +291,28 @@ async fn run_agent_turn(
             content: response.text.clone(),
         });
 
-        let visible = strip_tool_calls(&response.text);
-        if !visible.trim().is_empty() {
+        let parsed = parse_model_output(&response.text)?;
+        if !parsed.visible_text.trim().is_empty() {
             if !final_visible.is_empty() {
                 final_visible.push_str("\n\n");
             }
-            final_visible.push_str(visible.trim());
+            final_visible.push_str(parsed.visible_text.trim());
         }
 
-        let calls = parse_tool_calls(&response.text)?;
+        let mut calls = parsed.calls;
+        if calls.is_empty() {
+            if let Some(call) = infer_file_write(user_input, &response.text) {
+                state.session.append("inferred_tool_call", &call)?;
+                calls.push(call);
+            }
+        }
         if calls.is_empty() {
             return Ok(final_visible);
         }
 
         let mut tool_results = Vec::new();
-        for call in calls {
+        for mut call in calls {
+            normalize_local_tool_path(user_input, &mut call);
             if render_ui {
                 ui::working_for_tool(&call);
                 ui::render_tool_call(&call);
@@ -194,6 +330,23 @@ async fn run_agent_turn(
             role: MessageRole::Tool,
             content: render_tool_results(&tool_results)?,
         });
+
+        if state.model_profile().tool_protocol == ToolProtocol::SimpleJson
+            && tool_results
+                .iter()
+                .any(|result| result.success && result.tool == "write_file")
+        {
+            let summary = tool_results
+                .iter()
+                .find(|result| result.success && result.tool == "write_file")
+                .map(|result| result.content.clone())
+                .unwrap_or_else(|| "write_file completed".to_string());
+            return Ok(if final_visible.trim().is_empty() {
+                summary
+            } else {
+                format!("{}\n\n{}", final_visible.trim(), summary)
+            });
+        }
     }
 
     bail!(
@@ -277,6 +430,15 @@ fn handle_slash_command(
             ui::render_diff(&git_diff(&state.context.workspace));
             Ok(false)
         }
+        "/preview" => {
+            let path = parts.next().unwrap_or("index.html");
+            if state.preview.is_none() {
+                state.preview = Some(PreviewServer::start(state.context.workspace.clone())?);
+            }
+            let url = state.preview.as_ref().unwrap().url_for(path)?;
+            println!("preview  {url}");
+            Ok(false)
+        }
         other => {
             println!("unknown command `{other}`");
             Ok(false)
@@ -317,15 +479,18 @@ fn short_session_id(state: &AgentState) -> String {
 }
 
 fn git_branch(workspace: &PathBuf) -> String {
-    run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .lines()
-        .next()
-        .unwrap_or("no-git")
-        .to_string()
+    let branch = run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    if branch.starts_with("fatal:") || branch.trim().is_empty() {
+        return "no-git".to_string();
+    }
+    branch.lines().next().unwrap_or("no-git").to_string()
 }
 
 fn git_repo_state(workspace: &PathBuf) -> String {
     let status = run_git(workspace, &["status", "--short"]);
+    if status.starts_with("fatal:") {
+        return "no-git".to_string();
+    }
     if status.trim().is_empty() {
         "clean".to_string()
     } else {
@@ -369,41 +534,148 @@ fn run_git(workspace: &PathBuf, args: &[&str]) -> String {
     }
 }
 
-fn parse_tool_calls(text: &str) -> Result<Vec<ToolCall>> {
-    let mut calls = Vec::new();
-    let mut remaining = text;
-    while let Some(start) = remaining.find("<tool_call>") {
-        let after_start = &remaining[start + "<tool_call>".len()..];
-        let Some(end) = after_start.find("</tool_call>") else {
-            bail!("tool call tag was opened but not closed");
-        };
-        let raw = after_start[..end].trim();
-        calls.push(serde_json::from_str(raw)?);
-        remaining = &after_start[end + "</tool_call>".len()..];
-    }
-    Ok(calls)
-}
-
-fn strip_tool_calls(text: &str) -> String {
-    let mut output = String::new();
-    let mut remaining = text;
-    while let Some(start) = remaining.find("<tool_call>") {
-        output.push_str(&remaining[..start]);
-        let after_start = &remaining[start + "<tool_call>".len()..];
-        let Some(end) = after_start.find("</tool_call>") else {
-            return output;
-        };
-        remaining = &after_start[end + "</tool_call>".len()..];
-    }
-    output.push_str(remaining);
-    output
-}
-
 fn render_tool_results(results: &[ToolResult]) -> Result<String> {
     Ok(format!(
         "Tool results:\n{}",
         serde_json::to_string_pretty(results)?
     ))
+}
+
+fn local_model_prompt(workspace: &str, instructions: &str, max_chars: Option<usize>) -> String {
+    let mut prompt = format!(
+        r#"You are ClaudeCodeX. Keep responses short.
+
+Workspace: {workspace}
+
+Use one JSON action when you need a tool:
+{{"action":"write_file","path":"file","content":"text"}}
+{{"action":"read_file","path":"file"}}
+{{"action":"shell","command":"cmd"}}
+
+Return final text only when the task is done.
+
+Project instructions:
+{instructions}"#
+    );
+    if let Some(max_chars) = max_chars {
+        if prompt.len() > max_chars {
+            prompt.truncate(max_chars);
+            prompt.push_str("\n...[truncated]");
+        }
+    }
+    prompt
+}
+
+fn infer_file_write(user_input: &str, response: &str) -> Option<ToolCall> {
+    let path = infer_target_path(user_input)?;
+    let content = clean_file_content(response);
+    if !looks_like_file_content(&content, &path) {
+        return None;
+    }
+    Some(ToolCall {
+        tool: "write_file".to_string(),
+        arguments: json!({
+            "path": path,
+            "content": content
+        }),
+    })
+}
+
+fn normalize_local_tool_path(user_input: &str, call: &mut ToolCall) {
+    if call.tool != "write_file" {
+        return;
+    }
+    let Some(current) = call.arguments.get("path").and_then(|value| value.as_str()) else {
+        return;
+    };
+    if !matches!(current, "file" | "output" | "untitled" | "page") {
+        return;
+    }
+    if let Some(target) = infer_target_path(user_input) {
+        call.arguments["path"] = json!(target);
+    }
+}
+
+fn infer_target_path(user_input: &str) -> Option<String> {
+    let lowered = user_input.to_ascii_lowercase();
+    if !(lowered.contains("create")
+        || lowered.contains("write")
+        || lowered.contains("generate")
+        || lowered.contains("make"))
+    {
+        return None;
+    }
+
+    for token in user_input.split_whitespace() {
+        let cleaned = token.trim_matches(|ch: char| {
+            ch == '"' || ch == '\'' || ch == '`' || ch == ',' || ch == '.' || ch == ':'
+        });
+        if cleaned.ends_with(".html")
+            || cleaned.ends_with(".css")
+            || cleaned.ends_with(".js")
+            || cleaned.ends_with(".json")
+            || cleaned.ends_with(".md")
+        {
+            return Some(cleaned.replace('\\', "/"));
+        }
+    }
+
+    if lowered.contains("web page") || lowered.contains("html") {
+        return Some("index.html".to_string());
+    }
+    None
+}
+
+fn clean_file_content(response: &str) -> String {
+    let trimmed = response.trim();
+    if let Some(block) = first_fenced_block(trimmed) {
+        return block;
+    }
+    if let Some(stripped) = strip_fence(trimmed, "html") {
+        return stripped;
+    }
+    if let Some(stripped) = strip_fence(trimmed, "") {
+        return stripped;
+    }
+    trimmed.to_string()
+}
+
+fn first_fenced_block(text: &str) -> Option<String> {
+    let start = text.find("```")?;
+    let after_start = &text[start + 3..];
+    let body_start = after_start
+        .find('\n')
+        .map(|index| start + 3 + index + 1)
+        .unwrap_or(start + 3);
+    let end = text[body_start..].find("```")? + body_start;
+    Some(text[body_start..end].trim().to_string())
+}
+
+fn strip_fence(text: &str, language: &str) -> Option<String> {
+    let start = if language.is_empty() {
+        "```"
+    } else {
+        return text
+            .strip_prefix(&format!("```{language}"))
+            .and_then(|rest| rest.strip_suffix("```"))
+            .map(|value| value.trim().to_string());
+    };
+    text.strip_prefix(start)
+        .and_then(|rest| rest.strip_suffix("```"))
+        .map(|value| value.trim().to_string())
+}
+
+fn looks_like_file_content(content: &str, path: &str) -> bool {
+    let trimmed = content.trim_start();
+    if path.ends_with(".html") {
+        return trimmed.starts_with("<!DOCTYPE html")
+            || trimmed.starts_with("<!doctype html")
+            || trimmed.starts_with("<html");
+    }
+    if path.ends_with(".json") {
+        return trimmed.starts_with('{') || trimmed.starts_with('[');
+    }
+    !trimmed.is_empty()
 }
 
 fn base_prompt() -> &'static str {
@@ -427,11 +699,12 @@ mod tests {
 
     #[test]
     fn parses_multiple_tool_calls() {
-        let calls = parse_tool_calls(
+        let parsed = parse_model_output(
             r#"hi <tool_call>{"tool":"read_file","arguments":{"path":"Cargo.toml"}}</tool_call>
             <tool_call>{"tool":"git_status","arguments":{}}</tool_call>"#,
         )
         .unwrap();
+        let calls = parsed.calls;
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].tool, "read_file");
         assert_eq!(calls[1].tool, "git_status");
@@ -439,9 +712,44 @@ mod tests {
 
     #[test]
     fn strips_tool_call_blocks() {
-        let stripped = strip_tool_calls(
+        let parsed = parse_model_output(
             r#"before <tool_call>{"tool":"git_status","arguments":{}}</tool_call> after"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.visible_text.trim(), "before  after");
+    }
+
+    #[test]
+    fn infers_html_write_for_web_page() {
+        let call = infer_file_write(
+            "Create a simple web page",
+            "```html\n<!DOCTYPE html><html><body></body></html>\n```",
+        )
+        .unwrap();
+        assert_eq!(call.tool, "write_file");
+        assert_eq!(call.arguments["path"], "index.html");
+    }
+
+    #[test]
+    fn infers_first_html_fence_before_explanation() {
+        let call = infer_file_write(
+            "Create index.html",
+            "```html\n<!DOCTYPE html><html><body>ok</body></html>\n```\n\nI created it.",
+        )
+        .unwrap();
+        assert_eq!(
+            call.arguments["content"],
+            "<!DOCTYPE html><html><body>ok</body></html>"
         );
-        assert_eq!(stripped.trim(), "before  after");
+    }
+
+    #[test]
+    fn normalizes_vague_local_file_path() {
+        let mut call = ToolCall {
+            tool: "write_file".to_string(),
+            arguments: json!({"path":"file","content":"x"}),
+        };
+        normalize_local_tool_path("Create index.html", &mut call);
+        assert_eq!(call.arguments["path"], "index.html");
     }
 }

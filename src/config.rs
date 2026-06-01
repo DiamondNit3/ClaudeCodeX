@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub max_agent_turns: usize,
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
+    pub model_profiles: BTreeMap<String, ModelProfile>,
+    #[serde(default)]
     pub mcp: McpConfig,
 }
 
@@ -34,6 +36,54 @@ pub enum ProviderKind {
     Openai,
     Anthropic,
     LocalOpenaiCompatible,
+    Ollama,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfile {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default = "default_true")]
+    pub supports_system: bool,
+    #[serde(default)]
+    pub prefer_think_false: bool,
+    #[serde(default)]
+    pub tool_protocol: ToolProtocol,
+    #[serde(default)]
+    pub max_tool_prompt_size: Option<usize>,
+    #[serde(default)]
+    pub reasoning_field: bool,
+    #[serde(default)]
+    pub context_budget: Option<usize>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl Default for ModelProfile {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            supports_system: true,
+            prefer_think_false: false,
+            tool_protocol: ToolProtocol::Xml,
+            max_tool_prompt_size: None,
+            reasoning_field: false,
+            context_budget: None,
+            notes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolProtocol {
+    #[default]
+    Xml,
+    SimpleJson,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -156,6 +206,31 @@ impl Default for AppConfig {
                 max_output_tokens: Some(4096),
             },
         );
+        providers.insert(
+            "ollama".to_string(),
+            ProviderConfig {
+                kind: ProviderKind::Ollama,
+                api_key_env: None,
+                base_url: Some("http://localhost:11434".to_string()),
+                reasoning_effort: None,
+                max_output_tokens: Some(1024),
+            },
+        );
+
+        let mut model_profiles = BTreeMap::new();
+        model_profiles.insert(
+            "qwen3.5:0.8b".to_string(),
+            ModelProfile {
+                provider: Some("ollama".to_string()),
+                supports_system: false,
+                prefer_think_false: true,
+                tool_protocol: ToolProtocol::SimpleJson,
+                max_tool_prompt_size: Some(1200),
+                reasoning_field: true,
+                context_budget: Some(4096),
+                notes: Some("Small local model profile optimized for short prompts.".to_string()),
+            },
+        );
 
         Self {
             default_provider: "openai".to_string(),
@@ -163,6 +238,7 @@ impl Default for AppConfig {
             permission_profile: "ask".to_string(),
             max_agent_turns: 8,
             providers,
+            model_profiles,
             mcp: McpConfig::default(),
         }
     }

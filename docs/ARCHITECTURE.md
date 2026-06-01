@@ -25,6 +25,7 @@ Supported first-pass providers:
 - OpenAI Responses API
 - Anthropic Messages API
 - local OpenAI-compatible HTTP endpoints
+- native Ollama `/api/chat`
 
 ## Tool Boundary
 
@@ -40,6 +41,8 @@ The tool layer is owned by the harness, not the model provider. Built-in tools c
 - `git_diff`
 
 Tool input and output are plain JSON values so they can be bridged to provider-native tool calling and MCP later.
+
+The parser accepts strict XML tool calls, fenced JSON, bare JSON, local-model action JSON, and inferred file outputs for common cases such as raw HTML.
 
 ## Permissions
 

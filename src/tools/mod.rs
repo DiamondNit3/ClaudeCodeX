@@ -101,7 +101,12 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
             fs::create_dir_all(parent)?;
         }
         fs::write(&resolved, content)?;
-        Ok(format!("wrote {}", resolved.display()))
+        Ok(format!(
+            "wrote {}\n{} lines, {} bytes",
+            resolved.display(),
+            content.lines().count(),
+            content.len()
+        ))
     }
 
     async fn edit_file(&self, args: &Value) -> Result<String> {
@@ -115,8 +120,15 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
             bail!("old text was not found in {}", resolved.display());
         }
         let updated = original.replacen(old, new, 1);
+        let line_count = updated.lines().count();
+        let byte_count = updated.len();
         fs::write(&resolved, updated)?;
-        Ok(format!("edited {}", resolved.display()))
+        Ok(format!(
+            "edited {}\n{} lines, {} bytes",
+            resolved.display(),
+            line_count,
+            byte_count
+        ))
     }
 
     async fn glob_files(&self, args: &Value) -> Result<String> {

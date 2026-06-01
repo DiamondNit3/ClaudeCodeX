@@ -3,7 +3,9 @@ mod cli;
 mod config;
 mod context;
 mod mcp;
+mod parser;
 mod permissions;
+mod preview;
 mod providers;
 mod session;
 mod tools;
@@ -32,8 +34,14 @@ async fn main() -> Result<()> {
             agent::run_exec(config, registry, workspace, task).await
         }
         Commands::Resume { session } => {
-            session::print_sessions(session.as_deref())?;
-            Ok(())
+            if let Some(session) = session {
+                let config = AppConfig::load_or_default()?;
+                let registry = ProviderRegistry::from_config(&config)?;
+                agent::run_resume(config, registry, workspace, session).await
+            } else {
+                session::print_sessions(None)?;
+                Ok(())
+            }
         }
         Commands::Config { command } => match command {
             ConfigCommand::Init => {
@@ -85,6 +93,7 @@ fn doctor() -> Result<()> {
             println!("default model: {}", config.default_model);
             println!("permission profile: {}", config.permission_profile);
             println!("configured providers: {}", config.providers.len());
+            println!("configured model profiles: {}", config.model_profiles.len());
             println!("configured mcp servers: {}", config.mcp.servers.len());
         }
         Err(error) => println!("config error: {error:#}"),

@@ -10,6 +10,7 @@ This repository contains the first Rust implementation pass:
 - non-interactive `exec` mode
 - configurable provider/model routing
 - OpenAI, Anthropic, and local HTTP provider adapters
+- native Ollama adapter with local model profiles
 - built-in file, search, shell, and git tools
 - permission profiles for command and file access
 - project instruction loading from `AGENTS.md`, `.ccx/AGENTS.md`, `CLAUDE.md`, and `.cursor/rules`
@@ -37,6 +38,7 @@ Interactive slash commands include grouped session, model, workspace, and securi
 /help
 /status
 /diff
+/preview
 /clear
 /model
 /providers
@@ -74,6 +76,19 @@ kind = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com/v1"
 max_output_tokens = 8192
+
+[providers.ollama]
+kind = "ollama"
+base_url = "http://localhost:11434"
+max_output_tokens = 1024
+
+[model_profiles."qwen3.5:0.8b"]
+provider = "ollama"
+supports_system = false
+prefer_think_false = true
+tool_protocol = "simple-json"
+max_tool_prompt_size = 1200
+reasoning_field = true
 ```
 
 ## Design Principle
@@ -83,3 +98,5 @@ ClaudeCodeX does not try to bypass hidden provider policy or clone private syste
 ## TUI Direction
 
 The current UI is intentionally line-based and terminal-only. A future full-screen terminal UI is staged behind the `tui` feature path so the rendering primitives can move into `ratatui` widgets without making full-screen mode mandatory.
+
+See [docs/LOCAL_MODELS.md](docs/LOCAL_MODELS.md) for Ollama and Qwen setup notes.

@@ -1,7 +1,9 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -32,6 +34,7 @@ pub struct PermissionEngine {
     profile: PermissionProfile,
     workspace: PathBuf,
     interactive: bool,
+    always_allow: Arc<Mutex<HashSet<String>>>,
 }
 
 impl PermissionEngine {
@@ -40,6 +43,7 @@ impl PermissionEngine {
             profile,
             workspace,
             interactive,
+            always_allow: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -53,7 +57,7 @@ impl PermissionEngine {
             PermissionProfile::DangerFullAccess => Ok(()),
             PermissionProfile::Ask => {
                 self.ensure_workspace_path(path)?;
-                self.ask(&format!("Allow file write to {}?", path.display()))
+                self.ask_tool("write_file", &path.display().to_string(), "write_file:*")
             }
             _ => self.ensure_workspace_path(path),
         }
@@ -66,7 +70,7 @@ impl PermissionEngine {
             PermissionProfile::Ask
             | PermissionProfile::AcceptEdits
             | PermissionProfile::WorkspaceWrite => {
-                self.ask(&format!("Allow shell command `{command}`?"))
+                self.ask_tool("shell", command, &format!("shell:{command}"))
             }
         }
     }
@@ -90,18 +94,32 @@ impl PermissionEngine {
         }
     }
 
-    fn ask(&self, question: &str) -> Result<()> {
-        if !self.interactive {
-            bail!("{question} denied in non-interactive mode");
+    fn ask_tool(&self, tool: &str, target: &str, always_key: &str) -> Result<()> {
+        if self
+            .always_allow
+            .lock()
+            .map(|allowed| allowed.contains(always_key))
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
-        print!("{question} [y/N] ");
+        if !self.interactive {
+            bail!("{tool} {target} denied in non-interactive mode");
+        }
+        println!("{tool}  {target}");
+        print!("allow? [y]es / [n]o / [a]lways ");
         io::stdout().flush()?;
         let mut answer = String::new();
         io::stdin().read_line(&mut answer)?;
-        if matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-            Ok(())
-        } else {
-            bail!("operation denied by user")
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => Ok(()),
+            "a" | "always" => {
+                if let Ok(mut allowed) = self.always_allow.lock() {
+                    allowed.insert(always_key.to_string());
+                }
+                Ok(())
+            }
+            _ => bail!("operation denied by user"),
         }
     }
 }

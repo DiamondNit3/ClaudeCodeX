@@ -83,11 +83,11 @@ pub fn working_for_tool(call: &ToolCall) {
 pub fn render_tool_call(call: &ToolCall) {
     let target = tool_target(call);
     if target.is_empty() {
-        println!("{} {}", "●".cyan(), call.tool.as_str().bold());
+        println!("{} {}", "*".cyan(), call.tool.as_str().bold());
     } else {
         println!(
             "{} {}  {}",
-            "●".cyan(),
+            "*".cyan(),
             call.tool.as_str().bold(),
             target.dim()
         );
@@ -118,6 +118,7 @@ pub fn render_grouped_help() {
     println!("  /context       show loaded instructions");
     println!("  /status        show git status");
     println!("  /diff          show git diff");
+    println!("  /preview       serve a file locally");
     println!();
     println!("{}", "Security".bold());
     println!("  /permissions   show permission profile");
@@ -196,10 +197,22 @@ fn summarize_tool_result(result: &ToolResult) -> String {
 
     match result.tool.as_str() {
         "read_file" => format!("{} lines", result.content.lines().count()),
+        "write_file" | "edit_file" => summarize_file_mutation(&result.content),
         "glob" => format!("{} matches", non_empty_line_count(&result.content)),
         "grep" => format!("{} matches", non_empty_line_count(&result.content)),
         "shell" | "git_status" | "git_diff" => summarize_shell_json(&result.content),
         _ => first_line_or_count(&result.content),
+    }
+}
+
+fn summarize_file_mutation(content: &str) -> String {
+    let mut lines = content.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next().unwrap_or("updated");
+    let second = lines.next().unwrap_or("");
+    if second.is_empty() {
+        first.to_string()
+    } else {
+        format!("{first}  {second}")
     }
 }
 

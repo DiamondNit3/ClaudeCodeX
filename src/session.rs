@@ -30,6 +30,16 @@ impl Session {
         Ok(Self { id, path })
     }
 
+    pub fn open(id_or_prefix: &str) -> Result<Self> {
+        let path = find_session_path(id_or_prefix)?;
+        let id_text = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .context("session file name is not valid UTF-8")?;
+        let id = Uuid::parse_str(id_text)?;
+        Ok(Self { id, path })
+    }
+
     pub fn append<T: Serialize>(&self, kind: &str, payload: T) -> Result<()> {
         let event = SessionEvent {
             timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
@@ -48,6 +58,18 @@ impl Session {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+pub fn read_events(session: &Session) -> Result<Vec<SessionEvent>> {
+    let file = fs::File::open(session.path())?;
+    let mut events = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            events.push(serde_json::from_str(&line)?);
+        }
+    }
+    Ok(events)
 }
 
 pub fn print_sessions(filter: Option<&str>) -> Result<()> {
@@ -93,6 +115,32 @@ fn first_user_message(path: &Path) -> Result<String> {
         }
     }
     Ok(String::new())
+}
+
+fn find_session_path(id_or_prefix: &str) -> Result<PathBuf> {
+    let dir = sessions_dir()?;
+    let direct = dir.join(format!("{id_or_prefix}.jsonl"));
+    if direct.exists() {
+        return Ok(direct);
+    }
+
+    let mut matches = fs::read_dir(&dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(|id| id.starts_with(id_or_prefix))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => anyhow::bail!("no session found for `{id_or_prefix}`"),
+        _ => anyhow::bail!("session prefix `{id_or_prefix}` is ambiguous"),
+    }
 }
 
 fn sessions_dir() -> Result<PathBuf> {

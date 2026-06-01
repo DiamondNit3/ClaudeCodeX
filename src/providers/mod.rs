@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, ProviderConfig, ProviderKind};
+use crate::config::{AppConfig, ModelProfile, ProviderConfig, ProviderKind};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -26,6 +26,7 @@ pub enum MessageRole {
 pub struct ModelRequest {
     pub model: String,
     pub messages: Vec<ModelMessage>,
+    pub profile: ModelProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +77,7 @@ impl ProviderRegistry {
                 ProviderKind::LocalOpenaiCompatible => {
                     Arc::new(LocalOpenAiProvider::new(name, provider_config)?)
                 }
+                ProviderKind::Ollama => Arc::new(OllamaProvider::new(name, provider_config)?),
             };
             providers.insert(name.clone(), provider);
         }
@@ -311,7 +313,7 @@ impl ModelProvider for LocalOpenAiProvider {
         let mut messages = Vec::new();
         if !system_context.is_empty() {
             messages.push(json!({
-                "role": "user",
+                "role": if request.profile.supports_system { "system" } else { "user" },
                 "content": format!("Harness and project instructions:\n{system_context}")
             }));
         }
@@ -356,6 +358,94 @@ impl ModelProvider for LocalOpenAiProvider {
         let body: Value = response.json().await?;
         Ok(ModelResponse {
             text: extract_local_openai_text(&body),
+        })
+    }
+}
+
+struct OllamaProvider {
+    name: String,
+    client: Client,
+    base_url: String,
+    max_output_tokens: Option<u32>,
+}
+
+impl OllamaProvider {
+    fn new(name: &str, config: &ProviderConfig) -> Result<Self> {
+        Ok(Self {
+            name: name.to_string(),
+            client: Client::new(),
+            base_url: config
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "http://localhost:11434".to_string()),
+            max_output_tokens: config.max_output_tokens,
+        })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for OllamaProvider {
+    fn summary(&self) -> ProviderSummary {
+        ProviderSummary {
+            name: self.name.clone(),
+            kind: "ollama".to_string(),
+            base_url: self.base_url.clone(),
+            api_key_env: None,
+        }
+    }
+
+    async fn generate(&self, request: ModelRequest) -> Result<ModelResponse> {
+        let mut messages = Vec::new();
+        let system_context = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::System))
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        if !system_context.is_empty() {
+            messages.push(json!({
+                "role": if request.profile.supports_system { "system" } else { "user" },
+                "content": system_context
+            }));
+        }
+
+        messages.extend(
+            request
+                .messages
+                .iter()
+                .filter(|message| !matches!(message.role, MessageRole::System))
+                .map(|message| {
+                    json!({
+                        "role": role_name(&message.role),
+                        "content": &message.content
+                    })
+                }),
+        );
+
+        let mut body = json!({
+            "model": request.model,
+            "messages": messages,
+            "stream": false
+        });
+        if request.profile.prefer_think_false {
+            body["think"] = json!(false);
+        }
+        if let Some(max_tokens) = self.max_output_tokens {
+            body["options"] = json!({ "num_predict": max_tokens });
+        }
+
+        let response = self
+            .client
+            .post(format!("{}/api/chat", self.base_url.trim_end_matches('/')))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        Ok(ModelResponse {
+            text: extract_ollama_text(&body, request.profile.reasoning_field),
         })
     }
 }
@@ -421,4 +511,19 @@ fn extract_local_openai_text(body: &Value) -> String {
         .as_str()
         .unwrap_or_default()
         .to_string()
+}
+
+fn extract_ollama_text(body: &Value, include_reasoning: bool) -> String {
+    let message = &body["message"];
+    let content = message["content"].as_str().unwrap_or_default();
+    if !content.trim().is_empty() {
+        return content.to_string();
+    }
+    if include_reasoning {
+        return message["reasoning"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+    }
+    String::new()
 }
