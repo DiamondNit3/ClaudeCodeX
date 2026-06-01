@@ -18,6 +18,8 @@ pub struct AppConfig {
     pub model_profiles: BTreeMap<String, ModelProfile>,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub hooks: HooksConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +149,21 @@ fn default_true() -> bool {
 pub struct McpConfig {
     #[serde(default)]
     pub servers: BTreeMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub pre_tool: Vec<HookCommand>,
+    #[serde(default)]
+    pub post_tool: Vec<HookCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookCommand {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +345,7 @@ impl Default for AppConfig {
             providers,
             model_profiles,
             mcp: McpConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }

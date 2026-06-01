@@ -10,17 +10,19 @@ This repository contains the first Rust implementation pass:
 - non-interactive `exec` mode
 - configurable provider/model routing
 - unified effort controls for low, medium, high, and max runs
+- Ollama streaming output and provider-native tool metadata scaffolding
 - OpenAI, Anthropic, and local HTTP provider adapters
 - native Ollama adapter with local model profiles
-- built-in file, search, shell, and git tools
-- permission profiles for command and file access
+- built-in file, patch, search, shell, and git tools
+- permission profiles, protected path policy, command risk scoring, and hooks
 - project instruction loading from `AGENTS.md`, `.ccx/AGENTS.md`, `CLAUDE.md`, and `.cursor/rules`
-- JSONL session logging and resume listing
+- JSONL session logging, resume listing, and real context compaction
 - MCP server config and tool visibility plumbing
 - animated terminal mascot for activity feedback
+- review mode, workflow skill discovery, helper subagents, background task registry, benchmark smoke checks, and release checks
 - small, transparent base prompt
 
-Real OS-level sandboxing, full MCP invocation, subagents, and rich ratatui rendering are planned next.
+Full MCP invocation, richer provider-native streaming coverage, parallel model subagents, and rich ratatui rendering are planned next.
 
 ## Commands
 
@@ -31,6 +33,13 @@ ccx resume
 ccx config init
 ccx providers
 ccx mcp list
+ccx review
+ccx skills
+ccx subagent plan "inspect the edit strategy"
+ccx task spawn "run a long task"
+ccx task list
+ccx bench
+ccx release-check
 ccx doctor
 ```
 
@@ -39,8 +48,11 @@ Interactive slash commands include grouped session, model, workspace, and securi
 ```text
 /help
 /status
+/review
 /diff
 /preview
+/skills
+/subagent
 /clear
 /model
 /effort
@@ -86,6 +98,10 @@ max_output_tokens = 8192
 kind = "ollama"
 base_url = "http://localhost:11434"
 max_output_tokens = 1024
+
+[[hooks.pre_tool]]
+command = "powershell"
+args = ["-NoProfile", "-Command", "exit 0"]
 
 [model_profiles."qwen3.5:0.8b"]
 provider = "ollama"

@@ -1,6 +1,8 @@
 use crate::config::{AppConfig, EffortLevel, ModelProfile, ProviderConfig, ProviderKind};
+use crate::tools::ToolSpec;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,6 +30,7 @@ pub struct ModelRequest {
     pub messages: Vec<ModelMessage>,
     pub profile: ModelProfile,
     pub effort: EffortLevel,
+    pub tools: Vec<ToolSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +44,7 @@ pub struct ProviderSummary {
     pub kind: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
+    pub capabilities: ProviderCapabilities,
 }
 
 impl std::fmt::Display for ProviderSummary {
@@ -52,16 +56,48 @@ impl std::fmt::Display for ProviderSummary {
             .unwrap_or_else(|| " key=<none>".to_string());
         write!(
             formatter,
-            "{}: {} {}{}",
-            self.name, self.kind, self.base_url, key
+            "{}: {} {}{} caps={}",
+            self.name, self.kind, self.base_url, key, self.capabilities
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProviderCapabilities {
+    pub streaming: bool,
+    pub native_tools: bool,
+}
+
+impl std::fmt::Display for ProviderCapabilities {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut caps = Vec::new();
+        if self.streaming {
+            caps.push("streaming");
+        }
+        if self.native_tools {
+            caps.push("native-tools");
+        }
+        if caps.is_empty() {
+            caps.push("text-tools");
+        }
+        formatter.write_str(&caps.join(","))
     }
 }
 
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     fn summary(&self) -> ProviderSummary;
+    fn capabilities(&self) -> ProviderCapabilities;
     async fn generate(&self, request: ModelRequest) -> Result<ModelResponse>;
+    async fn generate_stream(
+        &self,
+        request: ModelRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelResponse> {
+        let response = self.generate(request).await?;
+        on_chunk(response.text.clone());
+        Ok(response)
+    }
 }
 
 pub struct ProviderRegistry {
@@ -134,6 +170,14 @@ impl ModelProvider for OpenAiProvider {
             kind: "openai-responses".to_string(),
             base_url: self.base_url.clone(),
             api_key_env: Some(self.api_key_env.clone()),
+            capabilities: self.capabilities(),
+        }
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: false,
+            native_tools: true,
         }
     }
 
@@ -165,6 +209,9 @@ impl ModelProvider for OpenAiProvider {
             .unwrap_or_else(|| default_openai_output_tokens(request.effort));
         if max_output_tokens > 0 {
             body["max_output_tokens"] = json!(max_output_tokens);
+        }
+        if !request.tools.is_empty() {
+            body["tools"] = json!(openai_tool_specs(&request.tools));
         }
 
         let response = self
@@ -217,6 +264,14 @@ impl ModelProvider for AnthropicProvider {
             kind: "anthropic-messages".to_string(),
             base_url: self.base_url.clone(),
             api_key_env: Some(self.api_key_env.clone()),
+            capabilities: self.capabilities(),
+        }
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: false,
+            native_tools: true,
         }
     }
 
@@ -245,19 +300,24 @@ impl ModelProvider for AnthropicProvider {
             })
             .collect::<Vec<_>>();
 
+        let mut body = json!({
+            "model": request.model,
+            "max_tokens": self
+                .max_output_tokens
+                .unwrap_or_else(|| default_anthropic_output_tokens(request.effort)),
+            "system": system,
+            "messages": messages
+        });
+        if !request.tools.is_empty() {
+            body["tools"] = json!(anthropic_tool_specs(&request.tools));
+        }
+
         let response = self
             .client
             .post(format!("{}/messages", self.base_url.trim_end_matches('/')))
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
-            .json(&json!({
-                "model": request.model,
-                "max_tokens": self
-                    .max_output_tokens
-                    .unwrap_or_else(|| default_anthropic_output_tokens(request.effort)),
-                "system": system,
-                "messages": messages
-            }))
+            .json(&body)
             .send()
             .await?
             .error_for_status()?;
@@ -300,6 +360,14 @@ impl ModelProvider for LocalOpenAiProvider {
             kind: "local-openai-compatible".to_string(),
             base_url: self.base_url.clone(),
             api_key_env: self.api_key_env.clone(),
+            capabilities: self.capabilities(),
+        }
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: false,
+            native_tools: false,
         }
     }
 
@@ -364,6 +432,16 @@ impl ModelProvider for LocalOpenAiProvider {
             text: extract_local_openai_text(&body),
         })
     }
+
+    async fn generate_stream(
+        &self,
+        request: ModelRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelResponse> {
+        let response = self.generate(request).await?;
+        on_chunk(response.text.clone());
+        Ok(response)
+    }
 }
 
 struct OllamaProvider {
@@ -395,56 +473,19 @@ impl ModelProvider for OllamaProvider {
             kind: "ollama".to_string(),
             base_url: self.base_url.clone(),
             api_key_env: None,
+            capabilities: self.capabilities(),
+        }
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            native_tools: false,
         }
     }
 
     async fn generate(&self, request: ModelRequest) -> Result<ModelResponse> {
-        let mut messages = Vec::new();
-        let system_context = request
-            .messages
-            .iter()
-            .filter(|message| matches!(message.role, MessageRole::System))
-            .map(|message| message.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        if !system_context.is_empty() {
-            messages.push(json!({
-                "role": if request.profile.supports_system { "system" } else { "user" },
-                "content": system_context
-            }));
-        }
-
-        messages.extend(
-            request
-                .messages
-                .iter()
-                .filter(|message| !matches!(message.role, MessageRole::System))
-                .map(|message| {
-                    json!({
-                        "role": role_name(&message.role),
-                        "content": &message.content
-                    })
-                }),
-        );
-
-        let mut body = json!({
-            "model": request.model,
-            "messages": messages,
-            "stream": false
-        });
-        body["think"] = json!(ollama_think(
-            request.effort,
-            request.profile.prefer_think_false
-        ));
-        let num_predict = self
-            .max_output_tokens
-            .unwrap_or_else(|| default_ollama_output_tokens(request.effort));
-        body["options"] = json!({
-            "num_predict": num_predict,
-            "num_ctx": default_ollama_context_tokens(request.effort)
-        });
-
+        let body = ollama_body(&request, false, self.max_output_tokens);
         let response = self
             .client
             .post(format!("{}/api/chat", self.base_url.trim_end_matches('/')))
@@ -457,6 +498,93 @@ impl ModelProvider for OllamaProvider {
             text: extract_ollama_text(&body, request.profile.reasoning_field),
         })
     }
+
+    async fn generate_stream(
+        &self,
+        request: ModelRequest,
+        on_chunk: &mut (dyn FnMut(String) + Send),
+    ) -> Result<ModelResponse> {
+        let include_reasoning = request.profile.reasoning_field;
+        let body = ollama_body(&request, true, self.max_output_tokens);
+        let response = self
+            .client
+            .post(format!("{}/api/chat", self.base_url.trim_end_matches('/')))
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut stream = response.bytes_stream();
+        let mut buffered = String::new();
+        let mut text = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            buffered.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(index) = buffered.find('\n') {
+                let line = buffered[..index].trim().to_string();
+                buffered = buffered[index + 1..].to_string();
+                if let Some(delta) = extract_ollama_stream_delta(&line, include_reasoning) {
+                    on_chunk(delta.clone());
+                    text.push_str(&delta);
+                }
+            }
+        }
+        if !buffered.trim().is_empty() {
+            if let Some(delta) = extract_ollama_stream_delta(buffered.trim(), include_reasoning) {
+                on_chunk(delta.clone());
+                text.push_str(&delta);
+            }
+        }
+
+        Ok(ModelResponse { text })
+    }
+}
+
+fn ollama_body(request: &ModelRequest, stream: bool, max_output_tokens: Option<u32>) -> Value {
+    let mut messages = Vec::new();
+    let system_context = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::System))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if !system_context.is_empty() {
+        messages.push(json!({
+            "role": if request.profile.supports_system { "system" } else { "user" },
+            "content": system_context
+        }));
+    }
+
+    messages.extend(
+        request
+            .messages
+            .iter()
+            .filter(|message| !matches!(message.role, MessageRole::System))
+            .map(|message| {
+                json!({
+                    "role": role_name(&message.role),
+                    "content": &message.content
+                })
+            }),
+    );
+
+    let mut body = json!({
+        "model": request.model,
+        "messages": messages,
+        "stream": stream
+    });
+    body["think"] = json!(ollama_think(
+        request.effort,
+        request.profile.prefer_think_false
+    ));
+    let num_predict =
+        max_output_tokens.unwrap_or_else(|| default_ollama_output_tokens(request.effort));
+    body["options"] = json!({
+        "num_predict": num_predict,
+        "num_ctx": default_ollama_context_tokens(request.effort)
+    });
+    body
 }
 
 fn role_name(role: &MessageRole) -> &'static str {
@@ -466,6 +594,60 @@ fn role_name(role: &MessageRole) -> &'static str {
         MessageRole::Assistant => "assistant",
         MessageRole::Tool => "user",
     }
+}
+
+fn openai_tool_specs(tools: &[ToolSpec]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": generic_tool_parameters(&tool.name)
+            })
+        })
+        .collect()
+}
+
+fn anthropic_tool_specs(tools: &[ToolSpec]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": generic_tool_parameters(&tool.name)
+            })
+        })
+        .collect()
+}
+
+fn generic_tool_parameters(tool: &str) -> Value {
+    let required = match tool {
+        "read_file" => vec!["path"],
+        "write_file" => vec!["path", "content"],
+        "edit_file" => vec!["path"],
+        "apply_patch" => vec!["path", "patch"],
+        "glob" => vec!["pattern"],
+        "grep" => vec!["query"],
+        "shell" => vec!["command"],
+        _ => Vec::new(),
+    };
+    json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "old": {"type": "string"},
+            "new": {"type": "string"},
+            "patch": {"type": "string"},
+            "pattern": {"type": "string"},
+            "query": {"type": "string"},
+            "command": {"type": "string"}
+        },
+        "required": required
+    })
 }
 
 fn extract_openai_response_text(body: &Value) -> Result<String> {
@@ -487,9 +669,19 @@ fn extract_openai_response_text(body: &Value) -> Result<String> {
     }
 
     if chunks.is_empty() {
+        if let Some(tool_calls) = extract_openai_tool_calls(body) {
+            return Ok(tool_calls);
+        }
         bail!("OpenAI response did not contain text output");
     }
-    Ok(chunks.join(""))
+    let mut text = chunks.join("");
+    if let Some(tool_calls) = extract_openai_tool_calls(body) {
+        if !text.trim().is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&tool_calls);
+    }
+    Ok(text)
 }
 
 fn extract_anthropic_text(body: &Value) -> Result<String> {
@@ -505,9 +697,63 @@ fn extract_anthropic_text(body: &Value) -> Result<String> {
     }
 
     if chunks.is_empty() {
+        if let Some(tool_calls) = extract_anthropic_tool_calls(body) {
+            return Ok(tool_calls);
+        }
         bail!("Anthropic response did not contain text output");
     }
-    Ok(chunks.join(""))
+    let mut text = chunks.join("");
+    if let Some(tool_calls) = extract_anthropic_tool_calls(body) {
+        if !text.trim().is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&tool_calls);
+    }
+    Ok(text)
+}
+
+fn extract_openai_tool_calls(body: &Value) -> Option<String> {
+    let output = body.get("output")?.as_array()?;
+    let mut calls = Vec::new();
+    for item in output {
+        if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            let name = item.get("name").and_then(Value::as_str)?;
+            let raw_args = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let arguments = serde_json::from_str::<Value>(raw_args).unwrap_or_else(|_| json!({}));
+            calls.push(format!(
+                "<tool_call>{}</tool_call>",
+                json!({"tool": name, "arguments": arguments})
+            ));
+        }
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls.join("\n"))
+    }
+}
+
+fn extract_anthropic_tool_calls(body: &Value) -> Option<String> {
+    let content = body.get("content")?.as_array()?;
+    let mut calls = Vec::new();
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+            let name = block.get("name").and_then(Value::as_str)?;
+            let arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
+            calls.push(format!(
+                "<tool_call>{}</tool_call>",
+                json!({"tool": name, "arguments": arguments})
+            ));
+        }
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls.join("\n"))
+    }
 }
 
 fn extract_local_openai_text(body: &Value) -> String {
@@ -535,6 +781,24 @@ fn extract_ollama_text(body: &Value, include_reasoning: bool) -> String {
             .to_string();
     }
     String::new()
+}
+
+fn extract_ollama_stream_delta(line: &str, include_reasoning: bool) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let message = value.get("message")?;
+    if let Some(content) = message.get("content").and_then(Value::as_str) {
+        if !content.is_empty() {
+            return Some(content.to_string());
+        }
+    }
+    if include_reasoning {
+        if let Some(reasoning) = message.get("reasoning").and_then(Value::as_str) {
+            if !reasoning.is_empty() {
+                return Some(reasoning.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn default_openai_output_tokens(effort: EffortLevel) -> u32 {
@@ -607,5 +871,14 @@ mod tests {
         assert!(!ollama_think(EffortLevel::Medium, false));
         assert!(ollama_think(EffortLevel::High, false));
         assert!(!ollama_think(EffortLevel::Max, true));
+    }
+
+    #[test]
+    fn parses_ollama_stream_delta() {
+        let line = r#"{"message":{"content":"hello"}}"#;
+        assert_eq!(
+            extract_ollama_stream_delta(line, false).as_deref(),
+            Some("hello")
+        );
     }
 }

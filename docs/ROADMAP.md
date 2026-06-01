@@ -11,8 +11,8 @@
 
 ## Milestone 2: Usable Coding Agent
 
-- Structured provider-native tool calling loop
-- Better patch application and diff preview
+- Structured provider-native tool calling metadata and extraction
+- Better patch application and diff preview summaries
 - Session resume with transcript replay
 - Context compaction
 - Rich line-based terminal rendering
@@ -35,7 +35,7 @@
 
 ## Milestone 5: Advanced Agentics
 
-- subagents
+- deterministic helper subagents
 - review mode
 - reusable workflow skills
 - background tasks
@@ -48,3 +48,11 @@
 - benchmark suite
 - package release binary
 - push to `DiamondNit3/ClaudeCodeX`
+
+## Remaining Depth Work
+
+- full MCP tool invocation
+- provider-native streaming for OpenAI and Anthropic
+- parallel model-backed subagents
+- stronger OS-level process isolation
+- GitHub Actions release pipeline and signed artifacts

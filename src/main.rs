@@ -1,19 +1,28 @@
 mod agent;
+mod bench;
 mod cli;
 mod config;
 mod context;
+mod hooks;
 mod mcp;
 mod parser;
+mod patch;
 mod permissions;
 mod preview;
 mod providers;
+mod release;
+mod review;
+mod safety;
 mod session;
+mod skills;
+mod subagents;
+mod tasks;
 mod tools;
 mod ui;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, ConfigCommand, McpCommand};
+use cli::{Cli, Commands, ConfigCommand, McpCommand, TaskCommand};
 use config::AppConfig;
 use providers::ProviderRegistry;
 
@@ -73,6 +82,17 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Review { paths } => review::run_review(&workspace, &paths),
+        Commands::Skills => skills::print_skills(&workspace),
+        Commands::Task { command } => match command {
+            TaskCommand::Spawn { task } => tasks::spawn_task(&workspace, &task),
+            TaskCommand::List => tasks::list_tasks(),
+            TaskCommand::Show { id } => tasks::show_task(&id),
+            TaskCommand::Cancel { id } => tasks::cancel_task(&id),
+        },
+        Commands::Subagent { kind, task } => subagents::run_subagent(&workspace, &kind, &task),
+        Commands::Bench => bench::run_bench(&workspace),
+        Commands::ReleaseCheck => release::print_release_check(),
         Commands::Doctor => {
             doctor()?;
             Ok(())
@@ -100,6 +120,11 @@ fn doctor() -> Result<()> {
             println!("configured providers: {}", config.providers.len());
             println!("configured model profiles: {}", config.model_profiles.len());
             println!("configured mcp servers: {}", config.mcp.servers.len());
+            println!(
+                "configured hooks: {} pre, {} post",
+                config.hooks.pre_tool.len(),
+                config.hooks.post_tool.len()
+            );
         }
         Err(error) => println!("config error: {error:#}"),
     }

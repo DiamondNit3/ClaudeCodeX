@@ -1,3 +1,4 @@
+use crate::safety::{classify_command, ensure_not_protected, CommandRisk};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -48,10 +49,18 @@ impl PermissionEngine {
     }
 
     pub fn check_read_path(&self, path: &Path) -> Result<()> {
-        self.ensure_workspace_path(path)
+        self.ensure_workspace_path(path)?;
+        ensure_not_protected(
+            path,
+            &self.workspace,
+            self.profile == PermissionProfile::DangerFullAccess,
+        )
     }
 
     pub fn check_write_path(&self, path: &Path) -> Result<()> {
+        if self.profile != PermissionProfile::DangerFullAccess {
+            ensure_not_protected(path, &self.workspace, false)?;
+        }
         match self.profile {
             PermissionProfile::ReadOnly => bail!("write denied by read-only permission profile"),
             PermissionProfile::DangerFullAccess => Ok(()),
@@ -64,14 +73,25 @@ impl PermissionEngine {
     }
 
     pub fn check_shell(&self, command: &str) -> Result<()> {
+        let risk = classify_command(command);
+        if self.profile != PermissionProfile::DangerFullAccess
+            && matches!(
+                risk,
+                CommandRisk::Destructive | CommandRisk::Credential | CommandRisk::Privilege
+            )
+        {
+            bail!("shell denied by command risk policy: {risk}");
+        }
         match self.profile {
             PermissionProfile::ReadOnly => bail!("shell denied by read-only permission profile"),
             PermissionProfile::DangerFullAccess | PermissionProfile::FullAccess => Ok(()),
             PermissionProfile::Ask
             | PermissionProfile::AcceptEdits
-            | PermissionProfile::WorkspaceWrite => {
-                self.ask_tool("shell", command, &format!("shell:{command}"))
-            }
+            | PermissionProfile::WorkspaceWrite => self.ask_tool(
+                "shell",
+                &format!("[risk:{risk}] {command}"),
+                &format!("shell:{command}"),
+            ),
         }
     }
 

@@ -31,6 +31,28 @@ pub enum Commands {
         #[command(subcommand)]
         command: McpCommand,
     },
+    #[command(about = "Review current git diff or selected paths")]
+    Review {
+        #[arg()]
+        paths: Vec<std::path::PathBuf>,
+    },
+    #[command(about = "List reusable workflow skills")]
+    Skills,
+    #[command(about = "Manage background tasks")]
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
+    #[command(about = "Run a deterministic helper subagent")]
+    Subagent {
+        kind: String,
+        #[arg(required = true)]
+        task: String,
+    },
+    #[command(about = "Run benchmark smoke checks")]
+    Bench,
+    #[command(about = "Print release checklist")]
+    ReleaseCheck,
     #[command(about = "Print environment and configuration diagnostics")]
     Doctor,
 }
@@ -45,4 +67,19 @@ pub enum ConfigCommand {
 #[derive(Debug, Subcommand)]
 pub enum McpCommand {
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    Spawn {
+        #[arg(required = true)]
+        task: String,
+    },
+    List,
+    Show {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
 }

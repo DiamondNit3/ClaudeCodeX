@@ -1,5 +1,8 @@
+use crate::hooks::HookRunner;
+use crate::patch::{apply_edit, diff_summary};
 use crate::permissions::PermissionEngine;
-use anyhow::{bail, Context, Result};
+use crate::safety::classify_command;
+use anyhow::{Context, Result};
 use glob::glob;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,13 +30,15 @@ pub struct ToolResult {
 pub struct ToolRegistry {
     workspace: PathBuf,
     permissions: PermissionEngine,
+    hooks: HookRunner,
 }
 
 impl ToolRegistry {
-    pub fn new(workspace: PathBuf, permissions: PermissionEngine) -> Self {
+    pub fn new(workspace: PathBuf, permissions: PermissionEngine, hooks: HookRunner) -> Self {
         Self {
             workspace,
             permissions,
+            hooks,
         }
     }
 
@@ -42,6 +47,7 @@ impl ToolRegistry {
 <tool_call>{"tool":"read_file","arguments":{"path":"src/main.rs"}}</tool_call>
 <tool_call>{"tool":"write_file","arguments":{"path":"notes.txt","content":"..."}}</tool_call>
 <tool_call>{"tool":"edit_file","arguments":{"path":"src/main.rs","old":"exact old text","new":"replacement text"}}</tool_call>
+<tool_call>{"tool":"apply_patch","arguments":{"path":"src/main.rs","patch":"@@\n old\n-new\n+new"}}</tool_call>
 <tool_call>{"tool":"glob","arguments":{"pattern":"src/**/*.rs"}}</tool_call>
 <tool_call>{"tool":"grep","arguments":{"query":"TODO","path":"src"}}</tool_call>
 <tool_call>{"tool":"shell","arguments":{"command":"cargo test"}}</tool_call>
@@ -51,12 +57,40 @@ impl ToolRegistry {
 Use tools when needed to inspect or modify the workspace. After tool results, continue until the task is complete."#
     }
 
+    pub fn native_tool_specs() -> Vec<ToolSpec> {
+        vec![
+            ToolSpec::new("read_file", "Read a UTF-8 text file from the workspace"),
+            ToolSpec::new("write_file", "Write a UTF-8 text file in the workspace"),
+            ToolSpec::new(
+                "edit_file",
+                "Replace exact old text or apply a patch to a file",
+            ),
+            ToolSpec::new(
+                "apply_patch",
+                "Apply a guarded unified diff patch to one file",
+            ),
+            ToolSpec::new("glob", "List workspace files matching a glob"),
+            ToolSpec::new("grep", "Search workspace files for text"),
+            ToolSpec::new("shell", "Run a shell command after permission checks"),
+            ToolSpec::new("git_status", "Show git status"),
+            ToolSpec::new("git_diff", "Show git diff"),
+        ]
+    }
+
     pub async fn execute(&self, call: ToolCall) -> ToolResult {
         let tool_name = call.tool.clone();
+        if let Err(error) = self.hooks.run_pre_tool(&self.workspace, &call) {
+            return ToolResult {
+                tool: tool_name,
+                success: false,
+                content: format!("{error:#}"),
+            };
+        }
         let result = match call.tool.as_str() {
             "read_file" => self.read_file(&call.arguments).await,
             "write_file" => self.write_file(&call.arguments).await,
             "edit_file" => self.edit_file(&call.arguments).await,
+            "apply_patch" => self.apply_patch(&call.arguments).await,
             "glob" => self.glob_files(&call.arguments).await,
             "grep" => self.grep_files(&call.arguments).await,
             "shell" => self.shell(&call.arguments).await,
@@ -71,7 +105,7 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
             }
         };
 
-        match result {
+        let result = match result {
             Ok(content) => ToolResult {
                 tool: tool_name,
                 success: true,
@@ -82,7 +116,15 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
                 success: false,
                 content: format!("{error:#}"),
             },
+        };
+        if let Err(error) = self.hooks.run_post_tool(&self.workspace, &result) {
+            return ToolResult {
+                tool: result.tool,
+                success: false,
+                content: format!("{error:#}"),
+            };
         }
+        result
     }
 
     async fn read_file(&self, args: &Value) -> Result<String> {
@@ -111,24 +153,38 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
 
     async fn edit_file(&self, args: &Value) -> Result<String> {
         let path = self.path_arg(args)?;
-        let old = string_arg(args, "old")?;
-        let new = string_arg(args, "new")?;
         self.permissions.check_write_path(&path)?;
         let resolved = self.resolve(&path)?;
         let original = fs::read_to_string(&resolved)?;
-        if !original.contains(old) {
-            bail!("old text was not found in {}", resolved.display());
-        }
-        let updated = original.replacen(old, new, 1);
+        let old = args.get("old").and_then(Value::as_str);
+        let new = args.get("new").and_then(Value::as_str);
+        let patch = args.get("patch").and_then(Value::as_str);
+        let updated = apply_edit(&original, old, new, patch)
+            .with_context(|| format!("failed to edit {}", resolved.display()))?;
         let line_count = updated.lines().count();
         let byte_count = updated.len();
+        let summary = diff_summary(&original, &updated);
         fs::write(&resolved, updated)?;
         Ok(format!(
-            "edited {}\n{} lines, {} bytes",
+            "edited {}\n{}\n{} lines, {} bytes",
             resolved.display(),
+            summary,
             line_count,
             byte_count
         ))
+    }
+
+    async fn apply_patch(&self, args: &Value) -> Result<String> {
+        let path = self.path_arg(args)?;
+        let patch = string_arg(args, "patch")?;
+        self.permissions.check_write_path(&path)?;
+        let resolved = self.resolve(&path)?;
+        let original = fs::read_to_string(&resolved)?;
+        let updated = apply_edit(&original, None, None, Some(patch))
+            .with_context(|| format!("failed to patch {}", resolved.display()))?;
+        let summary = diff_summary(&original, &updated);
+        fs::write(&resolved, updated)?;
+        Ok(format!("patched {}\n{}", resolved.display(), summary))
     }
 
     async fn glob_files(&self, args: &Value) -> Result<String> {
@@ -249,8 +305,10 @@ async fn run_shell(workspace: &Path, command: &str) -> Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let status = output.status.code().unwrap_or(-1);
+    let risk = classify_command(command).to_string();
     Ok(json!({
         "status": status,
+        "risk": risk,
         "stdout": stdout,
         "stderr": stderr
     })
@@ -262,4 +320,19 @@ fn display_relative(workspace: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+}
+
+impl ToolSpec {
+    fn new(name: &str, description: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+        }
+    }
 }

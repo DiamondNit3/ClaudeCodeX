@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, EffortLevel, ModelProfile, ToolProtocol};
 use crate::context::ProjectContext;
+use crate::hooks::HookRunner;
 use crate::parser::parse_model_output;
 use crate::permissions::{PermissionEngine, PermissionProfile};
 use crate::preview::PreviewServer;
@@ -26,7 +27,14 @@ pub async fn run_interactive(
         workspace.clone(),
         true,
     );
-    let tools = ToolRegistry::new(workspace.clone(), permissions);
+    let tools = ToolRegistry::new(
+        workspace.clone(),
+        permissions,
+        HookRunner::new(
+            config.hooks.pre_tool.clone(),
+            config.hooks.post_tool.clone(),
+        ),
+    );
     let mut state = AgentState::new(config, context, session);
     state.append_metadata()?;
 
@@ -74,7 +82,14 @@ pub async fn run_resume(
         workspace.clone(),
         true,
     );
-    let tools = ToolRegistry::new(workspace, permissions);
+    let tools = ToolRegistry::new(
+        workspace,
+        permissions,
+        HookRunner::new(
+            config.hooks.pre_tool.clone(),
+            config.hooks.post_tool.clone(),
+        ),
+    );
     let mut state = AgentState::new(config, context, session);
     state.restore_transcript()?;
 
@@ -119,7 +134,14 @@ pub async fn run_exec(
         workspace.clone(),
         false,
     );
-    let tools = ToolRegistry::new(workspace, permissions);
+    let tools = ToolRegistry::new(
+        workspace,
+        permissions,
+        HookRunner::new(
+            config.hooks.pre_tool.clone(),
+            config.hooks.post_tool.clone(),
+        ),
+    );
     let mut state = AgentState::new(config, context, session);
     state.append_metadata()?;
     let output = run_agent_turn(&mut state, &providers, &tools, &task, false).await?;
@@ -188,6 +210,14 @@ impl AgentState {
                 "effort" => {
                     if let Some(effort) = event.payload.get("text").and_then(|v| v.as_str()) {
                         self.effort_override = effort.parse().ok();
+                    }
+                }
+                "compact_summary" => {
+                    if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
+                        self.transcript.push(ModelMessage {
+                            role: MessageRole::System,
+                            content: format!("Session summary so far:\n{text}"),
+                        });
                     }
                 }
                 "user" => {
@@ -287,18 +317,35 @@ async fn run_agent_turn(
         let provider = providers.get(&state.selected_provider)?;
         let mut messages = state.system_messages();
         messages.extend(state.transcript.clone());
-        let animation = render_ui.then(|| ui::ActivityAnimation::start("thinking"));
-        let response_result = provider
-            .generate(ModelRequest {
-                model: state.selected_model.clone(),
-                messages,
-                profile: state.model_profile(),
-                effort: state.current_effort(),
-            })
-            .await;
-        if let Some(animation) = animation {
-            animation.stop();
-        }
+        let request = ModelRequest {
+            model: state.selected_model.clone(),
+            messages,
+            profile: state.model_profile(),
+            effort: state.current_effort(),
+            tools: ToolRegistry::native_tool_specs(),
+        };
+        let mut streamed_any = false;
+        let response_result = if provider.capabilities().streaming {
+            let result = provider
+                .generate_stream(request, &mut |chunk| {
+                    if render_ui {
+                        streamed_any = true;
+                        ui::render_stream_chunk(&chunk);
+                    }
+                })
+                .await;
+            if streamed_any {
+                println!();
+            }
+            result
+        } else {
+            let animation = render_ui.then(|| ui::ActivityAnimation::start("thinking"));
+            let result = provider.generate(request).await;
+            if let Some(animation) = animation {
+                animation.stop();
+            }
+            result
+        };
         let response = response_result?;
 
         state.session.append(
@@ -328,7 +375,11 @@ async fn run_agent_turn(
             }
         }
         if calls.is_empty() {
-            return Ok(final_visible);
+            return Ok(if streamed_any {
+                String::new()
+            } else {
+                final_visible
+            });
         }
 
         let mut tool_results = Vec::new();
@@ -452,13 +503,11 @@ fn handle_slash_command(
             Ok(false)
         }
         "/compact" => {
-            state.session.append(
-                "compact",
-                EventText {
-                    text: "manual compaction marker",
-                },
-            )?;
-            println!("compaction marker appended");
+            let summary = compact_transcript(&mut state.transcript);
+            state
+                .session
+                .append("compact_summary", EventText { text: &summary })?;
+            println!("compacted session context\n{summary}");
             Ok(false)
         }
         "/mascot" => {
@@ -467,6 +516,20 @@ fn handle_slash_command(
         }
         "/status" => {
             println!("{}", git_status(&state.context.workspace));
+            Ok(false)
+        }
+        "/review" => {
+            crate::review::run_review(&state.context.workspace, &[])?;
+            Ok(false)
+        }
+        "/skills" => {
+            crate::skills::print_skills(&state.context.workspace)?;
+            Ok(false)
+        }
+        "/subagent" => {
+            let kind = parts.next().unwrap_or("plan");
+            let task = parts.collect::<Vec<_>>().join(" ");
+            crate::subagents::run_subagent(&state.context.workspace, kind, &task)?;
             Ok(false)
         }
         "/diff" => {
@@ -584,6 +647,81 @@ fn render_tool_results(results: &[ToolResult]) -> Result<String> {
         "Tool results:\n{}",
         serde_json::to_string_pretty(results)?
     ))
+}
+
+fn compact_transcript(transcript: &mut Vec<ModelMessage>) -> String {
+    let keep = 8;
+    if transcript.len() <= keep {
+        return "context already compact".to_string();
+    }
+
+    let compacted_count = transcript.len().saturating_sub(keep);
+    let mut files = Vec::new();
+    let mut tool_success = 0;
+    let mut tool_failures = 0;
+    let mut user_goals = Vec::new();
+
+    for message in transcript.iter().take(compacted_count) {
+        match message.role {
+            MessageRole::User => user_goals.push(truncate_for_summary(&message.content, 140)),
+            MessageRole::Tool => {
+                if message.content.contains("\"success\": true") {
+                    tool_success += 1;
+                }
+                if message.content.contains("\"success\": false") {
+                    tool_failures += 1;
+                }
+                for marker in ["wrote ", "edited ", "patched "] {
+                    if let Some(index) = message.content.find(marker) {
+                        let path = message.content[index + marker.len()..]
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .trim();
+                        if !path.is_empty() {
+                            files.push(path.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    let summary = format!(
+        "Compacted {compacted_count} messages. Goals: {}. Tool results: {tool_success} ok, {tool_failures} failed. Files touched: {}.",
+        if user_goals.is_empty() {
+            "none recorded".to_string()
+        } else {
+            user_goals.join(" | ")
+        },
+        if files.is_empty() {
+            "none".to_string()
+        } else {
+            files.join(", ")
+        }
+    );
+
+    let recent = transcript.split_off(compacted_count);
+    transcript.clear();
+    transcript.push(ModelMessage {
+        role: MessageRole::System,
+        content: format!("Session summary so far:\n{summary}"),
+    });
+    transcript.extend(recent);
+    summary
+}
+
+fn truncate_for_summary(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn local_model_prompt(workspace: &str, instructions: &str, max_chars: Option<usize>) -> String {

@@ -151,6 +151,11 @@ pub fn render_tool_result(result: &ToolResult) {
     println!("  {} {}", status, summarize_tool_result(result));
 }
 
+pub fn render_stream_chunk(chunk: &str) {
+    print!("{chunk}");
+    let _ = io::stdout().flush();
+}
+
 pub fn render_grouped_help() {
     println!("{}", "Session".bold());
     println!("  /session       show session path");
@@ -167,8 +172,11 @@ pub fn render_grouped_help() {
     println!("{}", "Workspace".bold());
     println!("  /context       show loaded instructions");
     println!("  /status        show git status");
+    println!("  /review        review current git diff");
     println!("  /diff          show git diff");
     println!("  /preview       serve a file locally");
+    println!("  /skills        list reusable workflow skills");
+    println!("  /subagent      run helper subagent");
     println!();
     println!("{}", "Security".bold());
     println!("  /permissions   show permission profile");
