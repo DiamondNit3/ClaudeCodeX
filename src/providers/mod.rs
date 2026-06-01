@@ -300,16 +300,34 @@ impl ModelProvider for LocalOpenAiProvider {
     }
 
     async fn generate(&self, request: ModelRequest) -> Result<ModelResponse> {
-        let messages = request
+        let system_context = request
             .messages
             .iter()
-            .map(|message| {
-                json!({
-                    "role": role_name(&message.role),
-                    "content": &message.content
-                })
-            })
-            .collect::<Vec<_>>();
+            .filter(|message| matches!(message.role, MessageRole::System))
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let mut messages = Vec::new();
+        if !system_context.is_empty() {
+            messages.push(json!({
+                "role": "user",
+                "content": format!("Harness and project instructions:\n{system_context}")
+            }));
+        }
+
+        messages.extend(
+            request
+                .messages
+                .iter()
+                .filter(|message| !matches!(message.role, MessageRole::System))
+                .map(|message| {
+                    json!({
+                        "role": role_name(&message.role),
+                        "content": &message.content
+                    })
+                }),
+        );
 
         let mut body = json!({
             "model": request.model,
@@ -337,10 +355,7 @@ impl ModelProvider for LocalOpenAiProvider {
         let response = builder.send().await?.error_for_status()?;
         let body: Value = response.json().await?;
         Ok(ModelResponse {
-            text: body["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
+            text: extract_local_openai_text(&body),
         })
     }
 }
@@ -394,4 +409,16 @@ fn extract_anthropic_text(body: &Value) -> Result<String> {
         bail!("Anthropic response did not contain text output");
     }
     Ok(chunks.join(""))
+}
+
+fn extract_local_openai_text(body: &Value) -> String {
+    let message = &body["choices"][0]["message"];
+    let content = message["content"].as_str().unwrap_or_default();
+    if !content.trim().is_empty() {
+        return content.to_string();
+    }
+    message["reasoning"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
 }
