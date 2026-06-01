@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, EffortLevel, ModelProfile, ProviderConfig, ProviderKind};
-use crate::tools::ToolSpec;
+use crate::tools::{ToolCall, ToolSpec};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -36,6 +36,7 @@ pub struct ModelRequest {
 #[derive(Debug, Clone)]
 pub struct ModelResponse {
     pub text: String,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +93,7 @@ pub trait ModelProvider: Send + Sync {
     async fn generate_stream(
         &self,
         request: ModelRequest,
-        on_chunk: &mut (dyn FnMut(String) + Send),
+        on_chunk: &mut (dyn FnMut(String) -> bool + Send),
     ) -> Result<ModelResponse> {
         let response = self.generate(request).await?;
         on_chunk(response.text.clone());
@@ -176,7 +177,7 @@ impl ModelProvider for OpenAiProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: false,
+            streaming: true,
             native_tools: true,
         }
     }
@@ -226,7 +227,46 @@ impl ModelProvider for OpenAiProvider {
         let body: Value = response.json().await?;
         Ok(ModelResponse {
             text: extract_openai_response_text(&body)?,
+            tool_calls: extract_openai_native_tool_calls(&body),
         })
+    }
+
+    async fn generate_stream(
+        &self,
+        request: ModelRequest,
+        on_chunk: &mut (dyn FnMut(String) -> bool + Send),
+    ) -> Result<ModelResponse> {
+        let api_key = std::env::var(&self.api_key_env)
+            .with_context(|| format!("missing ${}", self.api_key_env))?;
+        let mut body = openai_body(&request, self.max_output_tokens);
+        body["stream"] = json!(true);
+        let response = self
+            .client
+            .post(format!("{}/responses", self.base_url.trim_end_matches('/')))
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buffer.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(line) = pop_sse_line(&mut buffer) {
+                if let Some(event) = parse_sse_json(&line) {
+                    if let Some(delta) = openai_stream_text_delta(&event) {
+                        text.push_str(&delta);
+                        if !on_chunk(delta) {
+                            return Ok(ModelResponse { text, tool_calls });
+                        }
+                    }
+                    tool_calls.extend(extract_openai_native_tool_calls(&event));
+                }
+            }
+        }
+        Ok(ModelResponse { text, tool_calls })
     }
 }
 
@@ -270,7 +310,7 @@ impl ModelProvider for AnthropicProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: false,
+            streaming: true,
             native_tools: true,
         }
     }
@@ -325,7 +365,47 @@ impl ModelProvider for AnthropicProvider {
         let body: Value = response.json().await?;
         Ok(ModelResponse {
             text: extract_anthropic_text(&body)?,
+            tool_calls: extract_anthropic_native_tool_calls(&body),
         })
+    }
+
+    async fn generate_stream(
+        &self,
+        request: ModelRequest,
+        on_chunk: &mut (dyn FnMut(String) -> bool + Send),
+    ) -> Result<ModelResponse> {
+        let api_key = std::env::var(&self.api_key_env)
+            .with_context(|| format!("missing ${}", self.api_key_env))?;
+        let mut body = anthropic_body(&request, self.max_output_tokens);
+        body["stream"] = json!(true);
+        let response = self
+            .client
+            .post(format!("{}/messages", self.base_url.trim_end_matches('/')))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            buffer.push_str(&String::from_utf8_lossy(&chunk?));
+            while let Some(line) = pop_sse_line(&mut buffer) {
+                if let Some(event) = parse_sse_json(&line) {
+                    if let Some(delta) = anthropic_stream_text_delta(&event) {
+                        text.push_str(&delta);
+                        if !on_chunk(delta) {
+                            return Ok(ModelResponse { text, tool_calls });
+                        }
+                    }
+                    tool_calls.extend(extract_anthropic_native_tool_calls(&event));
+                }
+            }
+        }
+        Ok(ModelResponse { text, tool_calls })
     }
 }
 
@@ -430,13 +510,14 @@ impl ModelProvider for LocalOpenAiProvider {
         let body: Value = response.json().await?;
         Ok(ModelResponse {
             text: extract_local_openai_text(&body),
+            tool_calls: Vec::new(),
         })
     }
 
     async fn generate_stream(
         &self,
         request: ModelRequest,
-        on_chunk: &mut (dyn FnMut(String) + Send),
+        on_chunk: &mut (dyn FnMut(String) -> bool + Send),
     ) -> Result<ModelResponse> {
         let response = self.generate(request).await?;
         on_chunk(response.text.clone());
@@ -496,13 +577,14 @@ impl ModelProvider for OllamaProvider {
         let body: Value = response.json().await?;
         Ok(ModelResponse {
             text: extract_ollama_text(&body, request.profile.reasoning_field),
+            tool_calls: Vec::new(),
         })
     }
 
     async fn generate_stream(
         &self,
         request: ModelRequest,
-        on_chunk: &mut (dyn FnMut(String) + Send),
+        on_chunk: &mut (dyn FnMut(String) -> bool + Send),
     ) -> Result<ModelResponse> {
         let include_reasoning = request.profile.reasoning_field;
         let body = ollama_body(&request, true, self.max_output_tokens);
@@ -523,19 +605,27 @@ impl ModelProvider for OllamaProvider {
                 let line = buffered[..index].trim().to_string();
                 buffered = buffered[index + 1..].to_string();
                 if let Some(delta) = extract_ollama_stream_delta(&line, include_reasoning) {
-                    on_chunk(delta.clone());
                     text.push_str(&delta);
+                    if !on_chunk(delta.clone()) {
+                        return Ok(ModelResponse {
+                            text,
+                            tool_calls: Vec::new(),
+                        });
+                    }
                 }
             }
         }
         if !buffered.trim().is_empty() {
             if let Some(delta) = extract_ollama_stream_delta(buffered.trim(), include_reasoning) {
-                on_chunk(delta.clone());
                 text.push_str(&delta);
+                on_chunk(delta.clone());
             }
         }
 
-        Ok(ModelResponse { text })
+        Ok(ModelResponse {
+            text,
+            tool_calls: Vec::new(),
+        })
     }
 }
 
@@ -594,6 +684,124 @@ fn role_name(role: &MessageRole) -> &'static str {
         MessageRole::Assistant => "assistant",
         MessageRole::Tool => "user",
     }
+}
+
+fn openai_body(request: &ModelRequest, max_output_tokens: Option<u32>) -> Value {
+    let instructions = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::System))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let input = request
+        .messages
+        .iter()
+        .filter(|message| !matches!(message.role, MessageRole::System))
+        .map(|message| {
+            if matches!(message.role, MessageRole::Tool) {
+                json!({
+                    "role": "user",
+                    "content": format!("Native tool results:\n{}", message.content)
+                })
+            } else {
+                json!({
+                    "role": role_name(&message.role),
+                    "content": &message.content
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut body = json!({
+        "model": request.model,
+        "instructions": instructions,
+        "input": input
+    });
+    body["reasoning"] = json!({ "effort": request.effort.openai_reasoning_effort() });
+    let max_output_tokens =
+        max_output_tokens.unwrap_or_else(|| default_openai_output_tokens(request.effort));
+    if max_output_tokens > 0 {
+        body["max_output_tokens"] = json!(max_output_tokens);
+    }
+    if !request.tools.is_empty() {
+        body["tools"] = json!(openai_tool_specs(&request.tools));
+    }
+    body
+}
+
+fn anthropic_body(request: &ModelRequest, max_output_tokens: Option<u32>) -> Value {
+    let system = request
+        .messages
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::System))
+        .map(|message| message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let messages = request
+        .messages
+        .iter()
+        .filter(|message| !matches!(message.role, MessageRole::System))
+        .map(|message| {
+            json!({
+                "role": match &message.role {
+                    MessageRole::Assistant => "assistant",
+                    _ => "user",
+                },
+                "content": &message.content
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut body = json!({
+        "model": request.model,
+        "max_tokens": max_output_tokens
+            .unwrap_or_else(|| default_anthropic_output_tokens(request.effort)),
+        "system": system,
+        "messages": messages
+    });
+    if !request.tools.is_empty() {
+        body["tools"] = json!(anthropic_tool_specs(&request.tools));
+    }
+    body
+}
+
+fn pop_sse_line(buffer: &mut String) -> Option<String> {
+    let index = buffer.find('\n')?;
+    let line = buffer[..index].trim().to_string();
+    *buffer = buffer[index + 1..].to_string();
+    Some(line)
+}
+
+fn parse_sse_json(line: &str) -> Option<Value> {
+    let data = line.strip_prefix("data:")?.trim();
+    if data == "[DONE]" || data.is_empty() {
+        return None;
+    }
+    serde_json::from_str(data).ok()
+}
+
+fn openai_stream_text_delta(event: &Value) -> Option<String> {
+    if event.get("type").and_then(Value::as_str) == Some("response.output_text.delta") {
+        return event
+            .get("delta")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    event
+        .get("output_text")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn anthropic_stream_text_delta(event: &Value) -> Option<String> {
+    if event.get("type").and_then(Value::as_str) == Some("content_block_delta") {
+        return event
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    None
 }
 
 fn openai_tool_specs(tools: &[ToolSpec]) -> Vec<Value> {
@@ -713,22 +921,15 @@ fn extract_anthropic_text(body: &Value) -> Result<String> {
 }
 
 fn extract_openai_tool_calls(body: &Value) -> Option<String> {
-    let output = body.get("output")?.as_array()?;
-    let mut calls = Vec::new();
-    for item in output {
-        if item.get("type").and_then(Value::as_str) == Some("function_call") {
-            let name = item.get("name").and_then(Value::as_str)?;
-            let raw_args = item
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("{}");
-            let arguments = serde_json::from_str::<Value>(raw_args).unwrap_or_else(|_| json!({}));
-            calls.push(format!(
+    let calls = extract_openai_native_tool_calls(body)
+        .into_iter()
+        .map(|call| {
+            format!(
                 "<tool_call>{}</tool_call>",
-                json!({"tool": name, "arguments": arguments})
-            ));
-        }
-    }
+                json!({"tool": call.tool, "arguments": call.arguments, "call_id": call.call_id})
+            )
+        })
+        .collect::<Vec<_>>();
     if calls.is_empty() {
         None
     } else {
@@ -737,23 +938,72 @@ fn extract_openai_tool_calls(body: &Value) -> Option<String> {
 }
 
 fn extract_anthropic_tool_calls(body: &Value) -> Option<String> {
-    let content = body.get("content")?.as_array()?;
-    let mut calls = Vec::new();
-    for block in content {
-        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-            let name = block.get("name").and_then(Value::as_str)?;
-            let arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
-            calls.push(format!(
+    let calls = extract_anthropic_native_tool_calls(body)
+        .into_iter()
+        .map(|call| {
+            format!(
                 "<tool_call>{}</tool_call>",
-                json!({"tool": name, "arguments": arguments})
-            ));
-        }
-    }
+                json!({"tool": call.tool, "arguments": call.arguments, "call_id": call.call_id})
+            )
+        })
+        .collect::<Vec<_>>();
     if calls.is_empty() {
         None
     } else {
         Some(calls.join("\n"))
     }
+}
+
+fn extract_openai_native_tool_calls(body: &Value) -> Vec<ToolCall> {
+    let Some(output) = body.get("output").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut calls = Vec::new();
+    for item in output {
+        if item.get("type").and_then(Value::as_str) == Some("function_call") {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let raw_args = item
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let arguments = serde_json::from_str::<Value>(raw_args).unwrap_or_else(|_| json!({}));
+            let call_id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            calls.push(ToolCall {
+                tool: name.to_string(),
+                arguments,
+                call_id,
+            });
+        }
+    }
+    calls
+}
+
+fn extract_anthropic_native_tool_calls(body: &Value) -> Vec<ToolCall> {
+    let Some(content) = body.get("content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut calls = Vec::new();
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+            let Some(name) = block.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let arguments = block.get("input").cloned().unwrap_or_else(|| json!({}));
+            let call_id = block.get("id").and_then(Value::as_str).map(str::to_string);
+            calls.push(ToolCall {
+                tool: name.to_string(),
+                arguments,
+                call_id,
+            });
+        }
+    }
+    calls
 }
 
 fn extract_local_openai_text(body: &Value) -> String {
@@ -880,5 +1130,26 @@ mod tests {
             extract_ollama_stream_delta(line, false).as_deref(),
             Some("hello")
         );
+    }
+
+    #[test]
+    fn parses_sse_json_line() {
+        let event = parse_sse_json(r#"data: {"delta":"x"}"#).unwrap();
+        assert_eq!(event["delta"], "x");
+    }
+
+    #[test]
+    fn extracts_openai_native_tool_call_id() {
+        let body = json!({
+            "output": [{
+                "type": "function_call",
+                "name": "read_file",
+                "call_id": "call_1",
+                "arguments": "{\"path\":\"src/main.rs\"}"
+            }]
+        });
+        let calls = extract_openai_native_tool_calls(&body);
+        assert_eq!(calls[0].tool, "read_file");
+        assert_eq!(calls[0].call_id.as_deref(), Some("call_1"));
     }
 }

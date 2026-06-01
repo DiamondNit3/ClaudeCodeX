@@ -28,7 +28,7 @@ Supported first-pass providers:
 - local OpenAI-compatible HTTP endpoints
 - native Ollama `/api/chat`
 
-Providers expose `ProviderCapabilities` for streaming and native tools. Ollama currently streams newline-delimited chat chunks into the terminal. OpenAI and Anthropic receive provider-native tool schemas and translate native tool calls back into the harness tool-call loop.
+Providers expose `ProviderCapabilities` for streaming and native tools. Ollama streams newline-delimited chat chunks, while OpenAI and Anthropic parse SSE deltas. Streaming text generation stops early when a complete text tool call is detected. OpenAI and Anthropic receive provider-native tool schemas and return native tool calls with call IDs into the harness tool-call loop.
 
 ## Effort Resolution
 
@@ -62,6 +62,14 @@ The parser accepts strict XML tool calls, fenced JSON, bare JSON, local-model ac
 ## Patch Engine
 
 `edit_file` supports exact search/replace and a guarded unified-diff subset. `apply_patch` applies one-file unified hunks only when the old context is found exactly, then reports a diff summary. This keeps first-pass patching deterministic and easy to reject on conflict.
+
+`read_file` also accepts `start_line` and `line_count` for fast, line-numbered windows. Large tool outputs are truncated for the model-facing transcript while full content is retained in the serialized tool result.
+
+## Context Efficiency
+
+Before each turn, ClaudeCodeX adds likely relevant files from explicit task paths and git diff paths. It applies model-profile context budgets by keeping durable summaries and recent turns. Simple search/review/status tasks can route to an Ollama-backed local model profile when one is configured, and effort is auto-lowered for lightweight tasks.
+
+Read-only batch tool calls are executed concurrently. Repeated grep, git status, and git diff results are cached inside the current tool registry for the session.
 
 ## Permissions
 
@@ -116,5 +124,6 @@ JSONL keeps sessions append-only, streamable, and easy to inspect.
 - `ccx skills` and `/skills` discover Markdown workflow skills from `.ccx/skills` and the user data directory.
 - `ccx subagent` and `/subagent` run bounded model-backed helper agents for search, review, test-debug, and planning. They use the configured model/provider, receive role-specific prompts, and are limited to read-only tools.
 - `ccx task` tracks background task metadata and logs.
+- `ccx task tail` prints recent background task logs, and task workers update running/complete/failed status.
 - `ccx bench` emits benchmark smoke checks as JSON.
 - `ccx release-check` prints the release verification checklist.

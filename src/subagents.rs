@@ -145,18 +145,21 @@ fn infer_subagent_tool_call(response: &str) -> Option<ToolCall> {
         return Some(ToolCall {
             tool: "glob".to_string(),
             arguments: json!({"pattern": "src/**/*.rs"}),
+            call_id: None,
         });
     }
     if lowered.contains("git_status") {
         return Some(ToolCall {
             tool: "git_status".to_string(),
             arguments: json!({}),
+            call_id: None,
         });
     }
     if lowered.contains("git_diff") {
         return Some(ToolCall {
             tool: "git_diff".to_string(),
             arguments: json!({}),
+            call_id: None,
         });
     }
     None
@@ -169,9 +172,12 @@ async fn execute_subagent_tool(tools: &ToolRegistry, call: ToolCall) -> ToolResu
     ) {
         return ToolResult {
             tool: call.tool,
+            call_id: call.call_id,
             success: false,
             content: "subagents are read-only; allowed tools are read_file, glob, grep, git_status, git_diff"
                 .to_string(),
+            full_content: None,
+            truncated: false,
         };
     }
     tools.execute(call).await

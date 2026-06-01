@@ -9,6 +9,7 @@ use crate::session::{self, Session};
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
 use crate::ui::{self, FooterInfo, HeaderInfo};
 use anyhow::{bail, Result};
+use futures_util::future::join_all;
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -263,6 +264,7 @@ impl AgentState {
                 _ => {}
             }
         }
+        self.trim_restored_transcript();
         Ok(())
     }
 
@@ -313,6 +315,26 @@ impl AgentState {
                 .resolve_effort(&self.selected_provider, &self.selected_model)
         })
     }
+
+    fn trim_restored_transcript(&mut self) {
+        const RECENT: usize = 24;
+        if self.transcript.len() <= RECENT {
+            return;
+        }
+        let mut durable = self
+            .transcript
+            .iter()
+            .filter(|message| {
+                matches!(message.role, MessageRole::System)
+                    && (message.content.contains("Session summary")
+                        || message.content.contains("Subagent `"))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let recent = self.transcript.split_off(self.transcript.len() - RECENT);
+        durable.extend(recent);
+        self.transcript = durable;
+    }
 }
 
 async fn run_agent_turn(
@@ -332,24 +354,48 @@ async fn run_agent_turn(
 
     let mut final_visible = String::new();
     for _ in 0..state.config.max_agent_turns {
-        let provider = providers.get(&state.selected_provider)?;
+        let (turn_provider, turn_model) = routed_provider_model(state, user_input);
+        let provider = providers.get(&turn_provider)?;
+        let turn_profile = state
+            .config
+            .model_profiles
+            .get(&turn_model)
+            .cloned()
+            .unwrap_or_default();
+        let turn_effort = auto_effort_for_task(
+            state
+                .effort_override
+                .unwrap_or_else(|| state.config.resolve_effort(&turn_provider, &turn_model)),
+            user_input,
+        );
         let mut messages = state.system_messages();
+        if let Some(relevant_context) = selected_file_context(&state.context.workspace, user_input)
+        {
+            messages.push(ModelMessage {
+                role: MessageRole::System,
+                content: relevant_context,
+            });
+        }
         messages.extend(state.transcript.clone());
+        messages = budget_messages(messages, turn_profile.context_budget);
         let request = ModelRequest {
-            model: state.selected_model.clone(),
+            model: turn_model,
             messages,
-            profile: state.model_profile(),
-            effort: state.current_effort(),
+            profile: turn_profile,
+            effort: turn_effort,
             tools: ToolRegistry::native_tool_specs(),
         };
         let mut streamed_any = false;
         let response_result = if provider.capabilities().streaming {
+            let mut streamed_text = String::new();
             let result = provider
                 .generate_stream(request, &mut |chunk| {
+                    streamed_text.push_str(&chunk);
                     if render_ui {
                         streamed_any = true;
                         ui::render_stream_chunk(&chunk);
                     }
+                    !has_complete_streamed_tool_call(&streamed_text)
                 })
                 .await;
             if streamed_any {
@@ -385,7 +431,11 @@ async fn run_agent_turn(
             final_visible.push_str(parsed.visible_text.trim());
         }
 
-        let mut calls = parsed.calls;
+        let mut calls = if response.tool_calls.is_empty() {
+            parsed.calls
+        } else {
+            response.tool_calls
+        };
         if calls.is_empty() {
             if let Some(call) = infer_file_write(user_input, &response.text) {
                 state.session.append("inferred_tool_call", &call)?;
@@ -400,21 +450,7 @@ async fn run_agent_turn(
             });
         }
 
-        let mut tool_results = Vec::new();
-        for mut call in calls {
-            normalize_local_tool_path(user_input, &mut call);
-            if render_ui {
-                ui::working_for_tool(&call);
-                ui::render_tool_call(&call);
-            }
-            state.session.append("tool_call", &call)?;
-            let result = tools.execute(call).await;
-            if render_ui {
-                ui::render_tool_result(&result);
-            }
-            state.session.append("tool_result", &result)?;
-            tool_results.push(result);
-        }
+        let tool_results = execute_tool_calls(state, tools, user_input, calls, render_ui).await?;
 
         state.transcript.push(ModelMessage {
             role: MessageRole::Tool,
@@ -525,6 +561,7 @@ async fn handle_slash_command(
             state
                 .session
                 .append("compact_summary", EventText { text: &summary })?;
+            state.session.append_memory("compact_summary", &summary)?;
             println!("compacted session context\n{summary}");
             Ok(false)
         }
@@ -557,6 +594,9 @@ async fn handle_slash_command(
             )
             .await?;
             state.session.append("subagent_result", &report)?;
+            state
+                .session
+                .append_memory("subagent_result", &report.report)?;
             state.transcript.push(ModelMessage {
                 role: MessageRole::System,
                 content: format!(
@@ -683,6 +723,157 @@ fn render_tool_results(results: &[ToolResult]) -> Result<String> {
     ))
 }
 
+async fn execute_tool_calls(
+    state: &mut AgentState,
+    tools: &ToolRegistry,
+    user_input: &str,
+    mut calls: Vec<ToolCall>,
+    render_ui: bool,
+) -> Result<Vec<ToolResult>> {
+    for call in &mut calls {
+        normalize_local_tool_path(user_input, call);
+        state.session.append("tool_call", &*call)?;
+        if render_ui {
+            ui::working_for_tool(call);
+            ui::render_tool_call(call);
+        }
+    }
+
+    let results = if calls.iter().all(is_read_only_call) && calls.len() > 1 {
+        join_all(calls.into_iter().map(|call| tools.execute(call))).await
+    } else {
+        let mut results = Vec::new();
+        for call in calls {
+            results.push(tools.execute(call).await);
+        }
+        results
+    };
+
+    for result in &results {
+        if render_ui {
+            ui::render_tool_result(result);
+        }
+        state.session.append("tool_result", result)?;
+    }
+    Ok(results)
+}
+
+fn is_read_only_call(call: &ToolCall) -> bool {
+    matches!(
+        call.tool.as_str(),
+        "read_file" | "glob" | "grep" | "git_status" | "git_diff"
+    )
+}
+
+fn has_complete_streamed_tool_call(text: &str) -> bool {
+    text.contains("</tool_call>")
+}
+
+fn auto_effort_for_task(configured: EffortLevel, user_input: &str) -> EffortLevel {
+    let lowered = user_input.to_ascii_lowercase();
+    if matches!(configured, EffortLevel::High | EffortLevel::Max) {
+        return configured;
+    }
+    if lowered.contains("review")
+        || lowered.contains("plan")
+        || lowered.contains("search")
+        || lowered.contains("find")
+        || lowered.contains("status")
+    {
+        return EffortLevel::Low;
+    }
+    if lowered.contains("multi-file")
+        || lowered.contains("architecture")
+        || lowered.contains("refactor")
+        || lowered.contains("debug")
+    {
+        return EffortLevel::High;
+    }
+    configured
+}
+
+fn routed_provider_model(state: &AgentState, user_input: &str) -> (String, String) {
+    let lowered = user_input.to_ascii_lowercase();
+    let simple = lowered.contains("review")
+        || lowered.contains("search")
+        || lowered.contains("find")
+        || lowered.contains("status")
+        || lowered.contains("list");
+    if simple {
+        if let Some((model, profile)) = state
+            .config
+            .model_profiles
+            .iter()
+            .find(|(_, profile)| profile.provider.as_deref() == Some("ollama"))
+        {
+            return (
+                profile
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "ollama".to_string()),
+                model.clone(),
+            );
+        }
+    }
+    (
+        state.selected_provider.clone(),
+        state.selected_model.clone(),
+    )
+}
+
+fn selected_file_context(workspace: &PathBuf, user_input: &str) -> Option<String> {
+    let mut files = Vec::new();
+    for token in user_input.split_whitespace() {
+        let cleaned = token.trim_matches(|ch: char| {
+            ch == '"' || ch == '\'' || ch == '`' || ch == ',' || ch == '.' || ch == ':' || ch == ';'
+        });
+        if cleaned.contains('.') || cleaned.contains('/') || cleaned.contains('\\') {
+            let path = workspace.join(cleaned);
+            if path.is_file() {
+                files.push(cleaned.replace('\\', "/"));
+            }
+        }
+    }
+
+    for line in git_diff(workspace).lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            files.push(path.to_string());
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    files.truncate(8);
+    if files.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Likely relevant files for this turn:\n{}",
+        files.join("\n")
+    ))
+}
+
+fn budget_messages(messages: Vec<ModelMessage>, budget: Option<usize>) -> Vec<ModelMessage> {
+    let Some(budget) = budget else {
+        return messages;
+    };
+    let mut total = 0usize;
+    let mut kept = Vec::new();
+    for message in messages.into_iter().rev() {
+        let len = message.content.len();
+        if total + len > budget && !matches!(message.role, MessageRole::System) {
+            continue;
+        }
+        total += len;
+        kept.push(message);
+        if total >= budget {
+            break;
+        }
+    }
+    kept.reverse();
+    kept
+}
+
 fn compact_transcript(transcript: &mut Vec<ModelMessage>) -> String {
     let keep = 8;
     if transcript.len() <= keep {
@@ -764,12 +955,13 @@ fn local_model_prompt(workspace: &str, instructions: &str, max_chars: Option<usi
 
 Workspace: {workspace}
 
-Use one JSON action when you need a tool:
+Use exactly one JSON action when you need a tool:
 {{"action":"write_file","path":"file","content":"text"}}
 {{"action":"read_file","path":"file"}}
+{{"action":"read_file","path":"file","start_line":1,"line_count":80}}
 {{"action":"shell","command":"cmd"}}
 
-Return final text only when the task is done.
+Return final text only when done. Keep output short.
 
 Project instructions:
 {instructions}"#
@@ -795,6 +987,7 @@ fn infer_file_write(user_input: &str, response: &str) -> Option<ToolCall> {
             "path": path,
             "content": content
         }),
+        call_id: None,
     })
 }
 
@@ -965,6 +1158,7 @@ mod tests {
         let mut call = ToolCall {
             tool: "write_file".to_string(),
             arguments: json!({"path":"file","content":"x"}),
+            call_id: None,
         };
         normalize_local_tool_path("Create index.html", &mut call);
         assert_eq!(call.arguments["path"], "index.html");

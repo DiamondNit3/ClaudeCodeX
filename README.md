@@ -10,19 +10,20 @@ This repository contains the first Rust implementation pass:
 - non-interactive `exec` mode
 - configurable provider/model routing
 - unified effort controls for low, medium, high, and max runs
-- Ollama streaming output and provider-native tool metadata scaffolding
+- Ollama/OpenAI/Anthropic streaming paths and stop-on-complete text tool calls
 - OpenAI, Anthropic, and local HTTP provider adapters
 - native Ollama adapter with local model profiles
-- built-in file, patch, search, shell, and git tools
+- built-in file, patch, search, shell, and git tools with read windows, truncation, and caching
 - permission profiles, protected path policy, command risk scoring, and hooks
 - project instruction loading from `AGENTS.md`, `.ccx/AGENTS.md`, `CLAUDE.md`, and `.cursor/rules`
 - JSONL session logging, resume listing, and real context compaction
 - MCP server config and tool visibility plumbing
 - animated terminal mascot for activity feedback
 - review mode, workflow skill discovery, model-backed read-only subagents, background task registry, benchmark smoke checks, and release checks
+- context budgeting, relevant-file hints, auto effort selection, and simple model routing
 - small, transparent base prompt
 
-Full MCP invocation, richer provider-native streaming coverage, parallel subagent execution, and rich ratatui rendering are planned next.
+Full MCP invocation, deeper provider-native tool-result continuation, parallel subagent execution, and rich ratatui rendering are planned next.
 
 ## Commands
 
@@ -38,6 +39,7 @@ ccx skills
 ccx subagent plan "inspect the edit strategy"
 ccx task spawn "run a long task"
 ccx task list
+ccx task tail <id>
 ccx bench
 ccx release-check
 ccx doctor

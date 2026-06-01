@@ -123,6 +123,7 @@ fn collect_malformed_action_calls(text: &str, calls: &mut Vec<ToolCall>) {
             "path": path,
             "content": content
         }),
+        call_id: None,
     });
 }
 
@@ -185,7 +186,14 @@ fn value_to_tool_call(value: Value) -> Result<Option<ToolCall>> {
         .and_then(|value| value.as_str().map(str::to_string))
     {
         let arguments = object.remove("arguments").unwrap_or_else(|| json!({}));
-        return Ok(Some(ToolCall { tool, arguments }));
+        let call_id = object
+            .remove("call_id")
+            .and_then(|value| value.as_str().map(str::to_string));
+        return Ok(Some(ToolCall {
+            tool,
+            arguments,
+            call_id,
+        }));
     }
 
     if let Some(action) = object
@@ -199,6 +207,7 @@ fn value_to_tool_call(value: Value) -> Result<Option<ToolCall>> {
         return Ok(Some(ToolCall {
             tool: action,
             arguments: Value::Object(arguments),
+            call_id: None,
         }));
     }
 

@@ -58,6 +58,20 @@ impl Session {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn append_memory(&self, kind: &str, text: &str) -> Result<()> {
+        let dir = AppConfig::data_dir()?.join("memory");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.jsonl", self.id));
+        let payload = serde_json::json!({
+            "timestamp_ms": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            "kind": kind,
+            "text": text
+        });
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(file, "{}", serde_json::to_string(&payload)?)?;
+        Ok(())
+    }
 }
 
 pub fn read_events(session: &Session) -> Result<Vec<SessionEvent>> {

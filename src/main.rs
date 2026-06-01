@@ -89,6 +89,8 @@ async fn main() -> Result<()> {
             TaskCommand::List => tasks::list_tasks(),
             TaskCommand::Show { id } => tasks::show_task(&id),
             TaskCommand::Cancel { id } => tasks::cancel_task(&id),
+            TaskCommand::Tail { id, lines } => tasks::tail_task(&id, lines),
+            TaskCommand::Worker { id, task } => tasks::run_worker(&id, &task),
         },
         Commands::Subagent { kind, task } => {
             let config = AppConfig::load_or_default()?;

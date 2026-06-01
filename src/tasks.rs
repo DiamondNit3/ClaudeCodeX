@@ -37,7 +37,9 @@ pub fn spawn_task(workspace: &Path, task: &str) -> Result<()> {
     let log_file = OpenOptions::new().create(true).append(true).open(&log)?;
     let err_file = log_file.try_clone()?;
     Command::new(exe)
-        .arg("exec")
+        .arg("task")
+        .arg("worker")
+        .arg(id.to_string())
         .arg(task)
         .current_dir(workspace)
         .stdout(Stdio::from(log_file))
@@ -80,6 +82,45 @@ pub fn show_task(id_prefix: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn tail_task(id_prefix: &str, lines: usize) -> Result<()> {
+    let metadata = find_task(id_prefix)?;
+    println!("{}  {}  {}", metadata.id, metadata.status, metadata.task);
+    if metadata.log.exists() {
+        let content = fs::read_to_string(&metadata.log)?;
+        let tail = content
+            .lines()
+            .rev()
+            .take(lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("{tail}");
+    }
+    Ok(())
+}
+
+pub fn run_worker(id: &str, task: &str) -> Result<()> {
+    update_status(id, "running")?;
+    let metadata = find_task(id)?;
+    let exe = std::env::current_exe()?;
+    let output = Command::new(exe).arg("exec").arg(task).output()?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&metadata.log)?;
+    use std::io::Write;
+    log.write_all(&output.stdout)?;
+    log.write_all(&output.stderr)?;
+    if output.status.success() {
+        update_status(id, "complete")?;
+    } else {
+        update_status(id, "failed")?;
+    }
+    Ok(())
+}
+
 pub fn cancel_task(id_prefix: &str) -> Result<()> {
     let metadata = find_task(id_prefix)?;
     fs::write(
@@ -104,6 +145,17 @@ fn find_task(id_prefix: &str) -> Result<TaskMetadata> {
         }
     }
     anyhow::bail!("no task found for `{id_prefix}`")
+}
+
+fn update_status(id_prefix: &str, status: &str) -> Result<()> {
+    let dir = tasks_dir()?;
+    let mut metadata = find_task(id_prefix)?;
+    metadata.status = status.to_string();
+    fs::write(
+        dir.join(format!("{}.json", metadata.id)),
+        serde_json::to_string_pretty(&metadata)?,
+    )?;
+    Ok(())
 }
 
 fn tasks_dir() -> Result<PathBuf> {

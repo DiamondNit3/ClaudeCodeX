@@ -82,4 +82,15 @@ pub enum TaskCommand {
     Cancel {
         id: String,
     },
+    Tail {
+        id: String,
+        #[arg(default_value_t = 80)]
+        lines: usize,
+    },
+    #[command(hide = true)]
+    Worker {
+        id: String,
+        #[arg(required = true)]
+        task: String,
+    },
 }
