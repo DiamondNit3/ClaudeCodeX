@@ -1,0 +1,12 @@
+/target/
+/.idea/
+/.vscode/
+*.pdb
+*.exe
+*.dll
+*.rlib
+*.rmeta
+*.log
+.env
+.env.*
+!.env.example

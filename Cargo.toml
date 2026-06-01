@@ -1,0 +1,25 @@
+[package]
+name = "claudecodex"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal-only agentic coding harness for frontier and local models"
+license = "MIT"
+
+[[bin]]
+name = "ccx"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+directories = "5.0"
+futures-util = "0.3"
+glob = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
+toml = "0.8"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+walkdir = "2.5"
