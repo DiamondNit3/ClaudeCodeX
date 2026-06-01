@@ -15,7 +15,8 @@
 - Better patch application and diff preview
 - Session resume with transcript replay
 - Context compaction
-- Rich terminal rendering
+- Rich line-based terminal rendering
+- Optional full-screen TUI behind the `tui` feature
 
 ## Milestone 3: Provider Expansion
 

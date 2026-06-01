@@ -4,10 +4,12 @@ use crate::permissions::{PermissionEngine, PermissionProfile};
 use crate::providers::{MessageRole, ModelMessage, ModelRequest, ProviderRegistry};
 use crate::session::Session;
 use crate::tools::{ToolCall, ToolRegistry, ToolResult};
+use crate::ui::{self, FooterInfo, HeaderInfo};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Command;
 
 pub async fn run_interactive(
     config: AppConfig,
@@ -24,13 +26,10 @@ pub async fn run_interactive(
     let tools = ToolRegistry::new(workspace.clone(), permissions);
     let mut state = AgentState::new(config, context, session);
 
-    println!("ClaudeCodeX terminal harness");
-    println!("session: {}", state.session.id);
-    println!("{}", state.context.summary());
-    println!("Type /help for commands, /exit to quit.");
+    render_header(&state);
 
     loop {
-        print!("ccx> ");
+        print!("{}", ui::prompt());
         io::stdout().flush()?;
         let mut input = String::new();
         if io::stdin().read_line(&mut input)? == 0 {
@@ -44,13 +43,15 @@ pub async fn run_interactive(
             if handle_slash_command(input, &mut state, &providers)? {
                 break;
             }
+            render_footer(&state);
             continue;
         }
 
-        let output = run_agent_turn(&mut state, &providers, &tools, input).await?;
+        let output = run_agent_turn(&mut state, &providers, &tools, input, true).await?;
         if !output.trim().is_empty() {
             println!("{output}");
         }
+        render_footer(&state);
     }
 
     Ok(())
@@ -71,7 +72,7 @@ pub async fn run_exec(
     );
     let tools = ToolRegistry::new(workspace, permissions);
     let mut state = AgentState::new(config, context, session);
-    let output = run_agent_turn(&mut state, &providers, &tools, &task).await?;
+    let output = run_agent_turn(&mut state, &providers, &tools, &task, false).await?;
     println!("{output}");
     eprintln!("session: {}", state.session.path().display());
     Ok(())
@@ -125,6 +126,7 @@ async fn run_agent_turn(
     providers: &ProviderRegistry,
     tools: &ToolRegistry,
     user_input: &str,
+    render_ui: bool,
 ) -> Result<String> {
     state
         .session
@@ -139,6 +141,9 @@ async fn run_agent_turn(
         let provider = providers.get(&state.selected_provider)?;
         let mut messages = state.system_messages();
         messages.extend(state.transcript.clone());
+        if render_ui {
+            ui::thinking();
+        }
         let response = provider
             .generate(ModelRequest {
                 model: state.selected_model.clone(),
@@ -172,8 +177,15 @@ async fn run_agent_turn(
 
         let mut tool_results = Vec::new();
         for call in calls {
+            if render_ui {
+                ui::working_for_tool(&call);
+                ui::render_tool_call(&call);
+            }
             state.session.append("tool_call", &call)?;
             let result = tools.execute(call).await;
+            if render_ui {
+                ui::render_tool_result(&result);
+            }
             state.session.append("tool_result", &result)?;
             tool_results.push(result);
         }
@@ -200,14 +212,12 @@ fn handle_slash_command(
     match command {
         "/exit" | "/quit" => Ok(true),
         "/help" => {
-            println!("/help                 show commands");
-            println!("/exit                 quit");
-            println!("/context              show loaded project context");
-            println!("/providers            list configured providers");
-            println!("/model [provider] [model] switch or show model");
-            println!("/permissions          show active permission profile");
-            println!("/session              show session path");
-            println!("/compact              append a manual compaction marker");
+            ui::render_grouped_help();
+            Ok(false)
+        }
+        "/clear" => {
+            ui::clear_screen()?;
+            render_header(state);
             Ok(false)
         }
         "/context" => {
@@ -259,10 +269,103 @@ fn handle_slash_command(
             println!("compaction marker appended");
             Ok(false)
         }
+        "/status" => {
+            println!("{}", git_status(&state.context.workspace));
+            Ok(false)
+        }
+        "/diff" => {
+            ui::render_diff(&git_diff(&state.context.workspace));
+            Ok(false)
+        }
         other => {
             println!("unknown command `{other}`");
             Ok(false)
         }
+    }
+}
+
+fn render_header(state: &AgentState) {
+    let session_short = short_session_id(state);
+    ui::render_header(HeaderInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        provider: &state.selected_provider,
+        model: &state.selected_model,
+        permissions: &state.config.permission_profile,
+        workspace: &state.context.workspace,
+        context_files: state.context.instruction_files.len(),
+        session_short: &session_short,
+        mode: "interactive",
+    });
+}
+
+fn render_footer(state: &AgentState) {
+    let session_short = short_session_id(state);
+    let branch = git_branch(&state.context.workspace);
+    let repo_state = git_repo_state(&state.context.workspace);
+    ui::render_footer(FooterInfo {
+        provider: &state.selected_provider,
+        model: &state.selected_model,
+        permissions: &state.config.permission_profile,
+        branch: &branch,
+        repo_state: &repo_state,
+        session_short: &session_short,
+    });
+}
+
+fn short_session_id(state: &AgentState) -> String {
+    state.session.id.to_string().chars().take(8).collect()
+}
+
+fn git_branch(workspace: &PathBuf) -> String {
+    run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .lines()
+        .next()
+        .unwrap_or("no-git")
+        .to_string()
+}
+
+fn git_repo_state(workspace: &PathBuf) -> String {
+    let status = run_git(workspace, &["status", "--short"]);
+    if status.trim().is_empty() {
+        "clean".to_string()
+    } else {
+        "dirty".to_string()
+    }
+}
+
+fn git_status(workspace: &PathBuf) -> String {
+    let status = run_git(workspace, &["status", "--short", "--branch"]);
+    if status.trim().is_empty() {
+        "clean".to_string()
+    } else {
+        status
+    }
+}
+
+fn git_diff(workspace: &PathBuf) -> String {
+    let mut output = run_git(workspace, &["diff", "--stat"]);
+    let diff = run_git(workspace, &["diff", "--"]);
+    if !output.trim().is_empty() && !diff.trim().is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&diff);
+    output
+}
+
+fn run_git(workspace: &PathBuf, args: &[&str]) -> String {
+    let Ok(output) = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+    else {
+        return "git unavailable".to_string();
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stdout.trim().is_empty() {
+        stderr.trim().to_string()
+    } else {
+        stdout.trim_end().to_string()
     }
 }
 

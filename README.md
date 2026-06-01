@@ -31,6 +31,22 @@ ccx mcp list
 ccx doctor
 ```
 
+Interactive slash commands include grouped session, model, workspace, and security controls:
+
+```text
+/help
+/status
+/diff
+/clear
+/model
+/providers
+/context
+/permissions
+/session
+/compact
+/exit
+```
+
 ## Configuration
 
 `ccx config init` writes a starter config to the platform config directory. On Windows this is usually:
@@ -63,3 +79,7 @@ max_output_tokens = 8192
 ## Design Principle
 
 ClaudeCodeX does not try to bypass hidden provider policy or clone private system prompts. It keeps the harness prompt small, visible, and tool-oriented, then unlocks model capability by using provider-native APIs, transparent context, and strong local tools.
+
+## TUI Direction
+
+The current UI is intentionally line-based and terminal-only. A future full-screen terminal UI is staged behind the `tui` feature path so the rendering primitives can move into `ratatui` widgets without making full-screen mode mandatory.

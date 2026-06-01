@@ -7,6 +7,7 @@
 *.rlib
 *.rmeta
 *.log
+screenshots/
 .env
 .env.*
 !.env.example

@@ -7,6 +7,7 @@ mod permissions;
 mod providers;
 mod session;
 mod tools;
+mod ui;
 
 use anyhow::Result;
 use clap::Parser;
