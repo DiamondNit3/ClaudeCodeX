@@ -36,7 +36,7 @@ ccx doctor
 `ccx config init` writes a starter config to the platform config directory. On Windows this is usually:
 
 ```text
-%APPDATA%\DiamondNit3\ClaudeCodeX\config.toml
+%APPDATA%\username\ClaudeCodeX\config.toml
 ```
 
 Example:
