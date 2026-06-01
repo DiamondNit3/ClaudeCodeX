@@ -9,6 +9,7 @@
    - loaded project instructions
    - user task
    - available tool schemas
+   - resolved effort level
    - prior session events
 4. Stream model output.
 5. Execute requested tools after permission checks.
@@ -26,6 +27,17 @@ Supported first-pass providers:
 - Anthropic Messages API
 - local OpenAI-compatible HTTP endpoints
 - native Ollama `/api/chat`
+
+## Effort Resolution
+
+ClaudeCodeX exposes one effort control with four values: `low`, `medium`, `high`, and `max`. The runtime resolves effort in this order:
+
+1. model profile
+2. provider config
+3. global config
+4. `medium`
+
+Interactive `/effort` changes apply only to the current session. Provider adapters translate the resolved value into native request fields where possible: OpenAI receives reasoning effort, Anthropic and local OpenAI-compatible providers receive output token defaults, and Ollama receives `num_predict`, `num_ctx`, and thinking mode hints.
 
 ## Tool Boundary
 

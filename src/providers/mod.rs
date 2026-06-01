@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, ModelProfile, ProviderConfig, ProviderKind};
+use crate::config::{AppConfig, EffortLevel, ModelProfile, ProviderConfig, ProviderKind};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -27,6 +27,7 @@ pub struct ModelRequest {
     pub model: String,
     pub messages: Vec<ModelMessage>,
     pub profile: ModelProfile,
+    pub effort: EffortLevel,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +105,6 @@ struct OpenAiProvider {
     client: Client,
     base_url: String,
     api_key_env: String,
-    reasoning_effort: Option<String>,
     max_output_tokens: Option<u32>,
 }
 
@@ -121,7 +121,6 @@ impl OpenAiProvider {
                 .api_key_env
                 .clone()
                 .unwrap_or_else(|| "OPENAI_API_KEY".to_string()),
-            reasoning_effort: config.reasoning_effort.clone(),
             max_output_tokens: config.max_output_tokens,
         })
     }
@@ -160,10 +159,11 @@ impl ModelProvider for OpenAiProvider {
             "instructions": instructions,
             "input": input.join("\n\n")
         });
-        if let Some(effort) = &self.reasoning_effort {
-            body["reasoning"] = json!({ "effort": effort });
-        }
-        if let Some(max_output_tokens) = self.max_output_tokens {
+        body["reasoning"] = json!({ "effort": request.effort.openai_reasoning_effort() });
+        let max_output_tokens = self
+            .max_output_tokens
+            .unwrap_or_else(|| default_openai_output_tokens(request.effort));
+        if max_output_tokens > 0 {
             body["max_output_tokens"] = json!(max_output_tokens);
         }
 
@@ -188,7 +188,7 @@ struct AnthropicProvider {
     client: Client,
     base_url: String,
     api_key_env: String,
-    max_output_tokens: u32,
+    max_output_tokens: Option<u32>,
 }
 
 impl AnthropicProvider {
@@ -204,7 +204,7 @@ impl AnthropicProvider {
                 .api_key_env
                 .clone()
                 .unwrap_or_else(|| "ANTHROPIC_API_KEY".to_string()),
-            max_output_tokens: config.max_output_tokens.unwrap_or(8192),
+            max_output_tokens: config.max_output_tokens,
         })
     }
 }
@@ -252,7 +252,9 @@ impl ModelProvider for AnthropicProvider {
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": request.model,
-                "max_tokens": self.max_output_tokens,
+                "max_tokens": self
+                    .max_output_tokens
+                    .unwrap_or_else(|| default_anthropic_output_tokens(request.effort)),
                 "system": system,
                 "messages": messages
             }))
@@ -338,6 +340,8 @@ impl ModelProvider for LocalOpenAiProvider {
         });
         if let Some(max_tokens) = self.max_output_tokens {
             body["max_tokens"] = json!(max_tokens);
+        } else {
+            body["max_tokens"] = json!(default_local_output_tokens(request.effort));
         }
 
         let mut builder = self
@@ -429,12 +433,17 @@ impl ModelProvider for OllamaProvider {
             "messages": messages,
             "stream": false
         });
-        if request.profile.prefer_think_false {
-            body["think"] = json!(false);
-        }
-        if let Some(max_tokens) = self.max_output_tokens {
-            body["options"] = json!({ "num_predict": max_tokens });
-        }
+        body["think"] = json!(ollama_think(
+            request.effort,
+            request.profile.prefer_think_false
+        ));
+        let num_predict = self
+            .max_output_tokens
+            .unwrap_or_else(|| default_ollama_output_tokens(request.effort));
+        body["options"] = json!({
+            "num_predict": num_predict,
+            "num_ctx": default_ollama_context_tokens(request.effort)
+        });
 
         let response = self
             .client
@@ -526,4 +535,77 @@ fn extract_ollama_text(body: &Value, include_reasoning: bool) -> String {
             .to_string();
     }
     String::new()
+}
+
+fn default_openai_output_tokens(effort: EffortLevel) -> u32 {
+    match effort {
+        EffortLevel::Low => 2048,
+        EffortLevel::Medium => 4096,
+        EffortLevel::High => 8192,
+        EffortLevel::Max => 16000,
+    }
+}
+
+fn default_anthropic_output_tokens(effort: EffortLevel) -> u32 {
+    match effort {
+        EffortLevel::Low => 2048,
+        EffortLevel::Medium => 4096,
+        EffortLevel::High => 8192,
+        EffortLevel::Max => 12000,
+    }
+}
+
+fn default_local_output_tokens(effort: EffortLevel) -> u32 {
+    match effort {
+        EffortLevel::Low => 512,
+        EffortLevel::Medium => 1024,
+        EffortLevel::High => 2048,
+        EffortLevel::Max => 4096,
+    }
+}
+
+fn default_ollama_output_tokens(effort: EffortLevel) -> u32 {
+    match effort {
+        EffortLevel::Low => 512,
+        EffortLevel::Medium => 1024,
+        EffortLevel::High => 2048,
+        EffortLevel::Max => 4096,
+    }
+}
+
+fn default_ollama_context_tokens(effort: EffortLevel) -> u32 {
+    match effort {
+        EffortLevel::Low => 4096,
+        EffortLevel::Medium => 8192,
+        EffortLevel::High => 16384,
+        EffortLevel::Max => 32768,
+    }
+}
+
+fn ollama_think(effort: EffortLevel, prefer_think_false: bool) -> bool {
+    if prefer_think_false {
+        return false;
+    }
+    matches!(effort, EffortLevel::High | EffortLevel::Max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_max_effort_to_provider_defaults() {
+        assert_eq!(EffortLevel::Max.openai_reasoning_effort(), "high");
+        assert_eq!(default_openai_output_tokens(EffortLevel::Max), 16000);
+        assert_eq!(default_anthropic_output_tokens(EffortLevel::Max), 12000);
+        assert_eq!(default_local_output_tokens(EffortLevel::Max), 4096);
+        assert_eq!(default_ollama_context_tokens(EffortLevel::Max), 32768);
+    }
+
+    #[test]
+    fn ollama_thinking_tracks_effort_and_profile_preference() {
+        assert!(!ollama_think(EffortLevel::Medium, false));
+        assert!(ollama_think(EffortLevel::High, false));
+        assert!(!ollama_think(EffortLevel::Max, true));
+    }
 }

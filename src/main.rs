@@ -91,6 +91,11 @@ fn doctor() -> Result<()> {
         Ok(config) => {
             println!("default provider: {}", config.default_provider);
             println!("default model: {}", config.default_model);
+            println!("global effort: {}", config.effort);
+            println!(
+                "resolved default effort: {}",
+                config.resolve_effort(&config.default_provider, &config.default_model)
+            );
             println!("permission profile: {}", config.permission_profile);
             println!("configured providers: {}", config.providers.len());
             println!("configured model profiles: {}", config.model_profiles.len());

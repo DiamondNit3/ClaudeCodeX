@@ -14,6 +14,7 @@ pub struct HeaderInfo<'a> {
     pub version: &'a str,
     pub provider: &'a str,
     pub model: &'a str,
+    pub effort: &'a str,
     pub permissions: &'a str,
     pub workspace: &'a Path,
     pub context_files: usize,
@@ -24,6 +25,7 @@ pub struct HeaderInfo<'a> {
 pub struct FooterInfo<'a> {
     pub provider: &'a str,
     pub model: &'a str,
+    pub effort: &'a str,
     pub permissions: &'a str,
     pub branch: &'a str,
     pub repo_state: &'a str,
@@ -33,20 +35,21 @@ pub struct FooterInfo<'a> {
 pub fn render_header(info: HeaderInfo<'_>) {
     println!("{}  {}", "ClaudeCodeX".bold(), info.version.dim());
     println!(
-        "{}   {:<22} {}   {}",
+        "{}   {:<22} {}       {}",
         "model".dim(),
         format!("{}:{}", info.provider, info.model).cyan(),
-        "permissions".dim(),
-        info.permissions.yellow()
+        "effort".dim(),
+        info.effort.magenta()
     );
     println!(
-        "{}    {:<22} {}       {} instruction file{}",
-        "repo".dim(),
-        repo_name(info.workspace).cyan(),
+        "{} {:<22} {}       {} instruction file{}",
+        "permissions".dim(),
+        info.permissions.yellow(),
         "context".dim(),
         info.context_files,
         if info.context_files == 1 { "" } else { "s" }
     );
+    println!("{}    {}", "repo".dim(), repo_name(info.workspace).cyan());
     println!(
         "{} {}               {}          {}",
         "session".dim(),
@@ -59,8 +62,9 @@ pub fn render_header(info: HeaderInfo<'_>) {
 
 pub fn render_footer(info: FooterInfo<'_>) {
     println!(
-        "{} | {} | {} | {} | session {}",
+        "{} | effort {} | {} | {} | {} | session {}",
         format!("{}:{}", info.provider, info.model).cyan(),
+        info.effort.magenta(),
         info.permissions.yellow(),
         info.branch,
         color_repo_state(info.repo_state),
@@ -112,6 +116,7 @@ pub fn render_grouped_help() {
     println!();
     println!("{}", "Model".bold());
     println!("  /model         show or switch model");
+    println!("  /effort        show or set effort");
     println!("  /providers     list providers");
     println!();
     println!("{}", "Workspace".bold());

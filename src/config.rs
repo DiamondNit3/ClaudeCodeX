@@ -3,12 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub default_provider: String,
     pub default_model: String,
     pub permission_profile: String,
+    #[serde(default)]
+    pub effort: EffortLevel,
     pub max_agent_turns: usize,
     pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default)]
@@ -25,6 +28,8 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
+    pub effort: Option<EffortLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
@@ -48,6 +53,8 @@ pub struct ModelProfile {
     #[serde(default)]
     pub prefer_think_false: bool,
     #[serde(default)]
+    pub effort: Option<EffortLevel>,
+    #[serde(default)]
     pub tool_protocol: ToolProtocol,
     #[serde(default)]
     pub max_tool_prompt_size: Option<usize>,
@@ -65,6 +72,7 @@ impl Default for ModelProfile {
             provider: None,
             supports_system: true,
             prefer_think_false: false,
+            effort: None,
             tool_protocol: ToolProtocol::Xml,
             max_tool_prompt_size: None,
             reasoning_field: false,
@@ -80,6 +88,55 @@ pub enum ToolProtocol {
     #[default]
     Xml,
     SimpleJson,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Max,
+}
+
+impl EffortLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn openai_reasoning_effort(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High | Self::Max => "high",
+        }
+    }
+}
+
+impl std::fmt::Display for EffortLevel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EffortLevel {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "medium" | "default" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "max" | "maximum" => Ok(Self::Max),
+            other => anyhow::bail!("unknown effort level `{other}`; use low, medium, high, or max"),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -137,6 +194,31 @@ impl AppConfig {
     pub fn data_dir() -> Result<PathBuf> {
         Ok(data_root()?)
     }
+
+    pub fn resolve_effort(&self, provider_name: &str, model_name: &str) -> EffortLevel {
+        if let Some(effort) = self
+            .model_profiles
+            .get(model_name)
+            .and_then(|profile| profile.effort)
+        {
+            return effort;
+        }
+
+        if let Some(provider) = self.providers.get(provider_name) {
+            if let Some(effort) = provider.effort {
+                return effort;
+            }
+            if let Some(effort) = provider
+                .reasoning_effort
+                .as_deref()
+                .and_then(|value| EffortLevel::from_str(value).ok())
+            {
+                return effort;
+            }
+        }
+
+        self.effort
+    }
 }
 
 fn config_root() -> Result<PathBuf> {
@@ -182,7 +264,8 @@ impl Default for AppConfig {
                 kind: ProviderKind::Openai,
                 api_key_env: Some("OPENAI_API_KEY".to_string()),
                 base_url: Some("https://api.openai.com/v1".to_string()),
-                reasoning_effort: Some("high".to_string()),
+                effort: Some(EffortLevel::High),
+                reasoning_effort: None,
                 max_output_tokens: Some(8192),
             },
         );
@@ -192,6 +275,7 @@ impl Default for AppConfig {
                 kind: ProviderKind::Anthropic,
                 api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
                 base_url: Some("https://api.anthropic.com/v1".to_string()),
+                effort: None,
                 reasoning_effort: None,
                 max_output_tokens: Some(8192),
             },
@@ -202,6 +286,7 @@ impl Default for AppConfig {
                 kind: ProviderKind::LocalOpenaiCompatible,
                 api_key_env: None,
                 base_url: Some("http://localhost:11434/v1".to_string()),
+                effort: None,
                 reasoning_effort: None,
                 max_output_tokens: Some(4096),
             },
@@ -212,6 +297,7 @@ impl Default for AppConfig {
                 kind: ProviderKind::Ollama,
                 api_key_env: None,
                 base_url: Some("http://localhost:11434".to_string()),
+                effort: None,
                 reasoning_effort: None,
                 max_output_tokens: Some(1024),
             },
@@ -224,6 +310,7 @@ impl Default for AppConfig {
                 provider: Some("ollama".to_string()),
                 supports_system: false,
                 prefer_think_false: true,
+                effort: Some(EffortLevel::Low),
                 tool_protocol: ToolProtocol::SimpleJson,
                 max_tool_prompt_size: Some(1200),
                 reasoning_field: true,
@@ -236,10 +323,51 @@ impl Default for AppConfig {
             default_provider: "openai".to_string(),
             default_model: "gpt-5.5".to_string(),
             permission_profile: "ask".to_string(),
+            effort: EffortLevel::Medium,
             max_agent_turns: 8,
             providers,
             model_profiles,
             mcp: McpConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_effort_by_profile_provider_global_order() {
+        let mut config = AppConfig::default();
+        config.effort = EffortLevel::Low;
+        config.providers.get_mut("openai").unwrap().effort = Some(EffortLevel::High);
+        config.model_profiles.insert(
+            "custom".to_string(),
+            ModelProfile {
+                provider: Some("openai".to_string()),
+                effort: Some(EffortLevel::Max),
+                ..ModelProfile::default()
+            },
+        );
+
+        assert_eq!(config.resolve_effort("openai", "custom"), EffortLevel::Max);
+        assert_eq!(
+            config.resolve_effort("openai", "unknown"),
+            EffortLevel::High
+        );
+        assert_eq!(
+            config.resolve_effort("missing", "unknown"),
+            EffortLevel::Low
+        );
+    }
+
+    #[test]
+    fn parses_legacy_reasoning_effort() {
+        let mut config = AppConfig::default();
+        let provider = config.providers.get_mut("local").unwrap();
+        provider.effort = None;
+        provider.reasoning_effort = Some("high".to_string());
+
+        assert_eq!(config.resolve_effort("local", "unknown"), EffortLevel::High);
     }
 }

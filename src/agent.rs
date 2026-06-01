@@ -1,4 +1,4 @@
-use crate::config::{AppConfig, ModelProfile, ToolProtocol};
+use crate::config::{AppConfig, EffortLevel, ModelProfile, ToolProtocol};
 use crate::context::ProjectContext;
 use crate::parser::parse_model_output;
 use crate::permissions::{PermissionEngine, PermissionProfile};
@@ -134,6 +134,7 @@ struct AgentState {
     session: Session,
     selected_provider: String,
     selected_model: String,
+    effort_override: Option<EffortLevel>,
     transcript: Vec<ModelMessage>,
     preview: Option<PreviewServer>,
 }
@@ -148,6 +149,7 @@ impl AgentState {
         Self {
             selected_provider,
             selected_model: config.default_model.clone(),
+            effort_override: None,
             config,
             context,
             session,
@@ -162,6 +164,7 @@ impl AgentState {
             json!({
                 "provider": &self.selected_provider,
                 "model": &self.selected_model,
+                "effort": self.current_effort().as_str(),
                 "permission_profile": &self.config.permission_profile,
                 "workspace": &self.context.workspace,
             }),
@@ -177,6 +180,14 @@ impl AgentState {
                     }
                     if let Some(model) = event.payload.get("model").and_then(|v| v.as_str()) {
                         self.selected_model = model.to_string();
+                    }
+                    if let Some(effort) = event.payload.get("effort").and_then(|v| v.as_str()) {
+                        self.effort_override = effort.parse().ok();
+                    }
+                }
+                "effort" => {
+                    if let Some(effort) = event.payload.get("text").and_then(|v| v.as_str()) {
+                        self.effort_override = effort.parse().ok();
                     }
                 }
                 "user" => {
@@ -247,6 +258,13 @@ impl AgentState {
             .cloned()
             .unwrap_or_default()
     }
+
+    fn current_effort(&self) -> EffortLevel {
+        self.effort_override.unwrap_or_else(|| {
+            self.config
+                .resolve_effort(&self.selected_provider, &self.selected_model)
+        })
+    }
 }
 
 async fn run_agent_turn(
@@ -277,6 +295,7 @@ async fn run_agent_turn(
                 model: state.selected_model.clone(),
                 messages,
                 profile: state.model_profile(),
+                effort: state.current_effort(),
             })
             .await?;
 
@@ -384,6 +403,24 @@ fn handle_slash_command(
             }
             Ok(false)
         }
+        "/effort" => {
+            let effort = parts.next();
+            match effort {
+                Some(value) => {
+                    let parsed: EffortLevel = value.parse()?;
+                    state.effort_override = Some(parsed);
+                    state.session.append(
+                        "effort",
+                        EventText {
+                            text: parsed.as_str(),
+                        },
+                    )?;
+                    println!("effort: {parsed}");
+                }
+                None => println!("effort: {}", state.current_effort()),
+            }
+            Ok(false)
+        }
         "/model" => {
             let provider = parts.next();
             let model = parts.next();
@@ -452,6 +489,7 @@ fn render_header(state: &AgentState) {
         version: env!("CARGO_PKG_VERSION"),
         provider: &state.selected_provider,
         model: &state.selected_model,
+        effort: state.current_effort().as_str(),
         permissions: &state.config.permission_profile,
         workspace: &state.context.workspace,
         context_files: state.context.instruction_files.len(),
@@ -467,6 +505,7 @@ fn render_footer(state: &AgentState) {
     ui::render_footer(FooterInfo {
         provider: &state.selected_provider,
         model: &state.selected_model,
+        effort: state.current_effort().as_str(),
         permissions: &state.config.permission_profile,
         branch: &branch,
         repo_state: &repo_state,

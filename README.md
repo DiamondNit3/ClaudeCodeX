@@ -9,6 +9,7 @@ This repository contains the first Rust implementation pass:
 - interactive terminal loop
 - non-interactive `exec` mode
 - configurable provider/model routing
+- unified effort controls for low, medium, high, and max runs
 - OpenAI, Anthropic, and local HTTP provider adapters
 - native Ollama adapter with local model profiles
 - built-in file, search, shell, and git tools
@@ -41,6 +42,7 @@ Interactive slash commands include grouped session, model, workspace, and securi
 /preview
 /clear
 /model
+/effort
 /providers
 /context
 /permissions
@@ -63,12 +65,13 @@ Example:
 default_provider = "openai"
 default_model = "gpt-5.5"
 permission_profile = "ask"
+effort = "medium"
 
 [providers.openai]
 kind = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com/v1"
-reasoning_effort = "high"
+effort = "high"
 max_output_tokens = 8192
 
 [providers.anthropic]
@@ -86,10 +89,13 @@ max_output_tokens = 1024
 provider = "ollama"
 supports_system = false
 prefer_think_false = true
+effort = "low"
 tool_protocol = "simple-json"
 max_tool_prompt_size = 1200
 reasoning_field = true
 ```
+
+Effort resolves in this order: model profile, provider, global config, then `medium`. In interactive sessions, `/effort low`, `/effort medium`, `/effort high`, or `/effort max` sets a session-only override. OpenAI receives native reasoning effort, Anthropic/local providers receive tuned output token budgets when no explicit max is configured, and Ollama receives tuned `num_predict`, `num_ctx`, and thinking flags.
 
 ## Design Principle
 

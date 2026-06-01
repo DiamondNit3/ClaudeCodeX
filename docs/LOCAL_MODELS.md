@@ -10,6 +10,7 @@ Use the native Ollama provider for best compatibility:
 default_provider = "ollama"
 default_model = "qwen3.5:0.8b"
 permission_profile = "workspace-write"
+effort = "low"
 
 [providers.ollama]
 kind = "ollama"
@@ -28,6 +29,7 @@ Profiles tune the harness for specific local models:
 provider = "ollama"
 supports_system = false
 prefer_think_false = true
+effort = "low"
 tool_protocol = "simple-json"
 max_tool_prompt_size = 1200
 reasoning_field = true
@@ -39,8 +41,13 @@ Profile behavior:
 
 - `supports_system = false` flattens system instructions into user-visible context.
 - `prefer_think_false = true` asks Ollama to suppress thinking when supported.
+- `effort = "low"` keeps small models on shorter outputs and smaller context defaults.
 - `tool_protocol = "simple-json"` uses shorter local-model tool instructions.
 - `reasoning_field = true` lets the adapter recover text from Ollama reasoning fields when content is empty.
+
+## Effort
+
+Effort can be set globally, per provider, per model profile, or interactively with `/effort low|medium|high|max`. Native Ollama requests map effort to `num_predict`, `num_ctx`, and thinking mode. For small models such as `qwen3.5:0.8b`, keep `prefer_think_false = true` and `effort = "low"` unless a task needs longer reasoning or larger output.
 
 ## Tool Fallbacks
 
