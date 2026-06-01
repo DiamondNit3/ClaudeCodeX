@@ -1,7 +1,7 @@
 use crate::tools::{ToolCall, ToolResult};
 use anyhow::Result;
 use crossterm::{
-    cursor::MoveTo,
+    cursor::{MoveTo, MoveUp},
     execute,
     style::Stylize,
     terminal::{Clear, ClearType},
@@ -17,6 +17,28 @@ use std::thread;
 use std::time::Duration;
 
 static MASCOT_TICK: AtomicUsize = AtomicUsize::new(0);
+const MASCOT_HEIGHT: usize = 4;
+const MASCOT_WIDTH: usize = 12;
+const MASCOT_FRAMES: [[&str; MASCOT_HEIGHT]; 3] = [
+    [
+        r"\  _    _  /",
+        r" \(o)--(o)/ ",
+        r"  /  ==  \  ",
+        r" /_/    \_\ ",
+    ],
+    [
+        r" \ _    _ / ",
+        r"  (o)--(o)  ",
+        r"  /  ==  \  ",
+        r" /_/    \_\ ",
+    ],
+    [
+        r"  _      _  ",
+        r" (o)--(o)   ",
+        r" /  ==  \   ",
+        r"/_/    \_\  ",
+    ],
+];
 
 pub struct HeaderInfo<'a> {
     pub version: &'a str,
@@ -41,30 +63,39 @@ pub struct FooterInfo<'a> {
 }
 
 pub fn render_header(info: HeaderInfo<'_>) {
+    let mascot = mascot_frame(0);
     println!(
         "{}  {}  {}",
-        next_mascot_frame().red(),
+        mascot[0].red(),
         "ClaudeCodeX".bold(),
         info.version.dim()
     );
     println!(
-        "{}   {:<22} {}       {}",
+        "{}  {}   {:<22} {}       {}",
+        mascot[1].red(),
         "model".dim(),
         format!("{}:{}", info.provider, info.model).cyan(),
         "effort".dim(),
         info.effort.magenta()
     );
     println!(
-        "{} {:<22} {}       {} instruction file{}",
+        "{}  {} {:<22} {}       {} instruction file{}",
+        mascot[2].red(),
         "permissions".dim(),
         info.permissions.yellow(),
         "context".dim(),
         info.context_files,
         if info.context_files == 1 { "" } else { "s" }
     );
-    println!("{}    {}", "repo".dim(), repo_name(info.workspace).cyan());
     println!(
-        "{} {}               {}          {}",
+        "{}  {}    {}",
+        mascot[3].red(),
+        "repo".dim(),
+        repo_name(info.workspace).cyan()
+    );
+    println!(
+        "{}  {} {}               {}          {}",
+        mascot_indent(),
         "session".dim(),
         info.session_short,
         "mode".dim(),
@@ -92,7 +123,7 @@ pub fn prompt() -> String {
 pub fn working_for_tool(call: &ToolCall) {
     println!(
         "{} {}",
-        next_mascot_frame().red(),
+        mascot_frame(MASCOT_TICK.fetch_add(1, Ordering::Relaxed))[0].red(),
         working_message(call).dim()
     );
 }
@@ -172,14 +203,19 @@ impl ActivityAnimation {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
         let handle = thread::spawn(move || {
+            let mut rendered = false;
+            let mut tick = 0;
             while !stop_for_thread.load(Ordering::Relaxed) {
-                print!(
-                    "\r{} {}",
-                    next_mascot_frame().red(),
-                    format!("{label}...").dim()
-                );
-                let _ = io::stdout().flush();
+                if rendered {
+                    clear_mascot_block();
+                }
+                render_mascot_block(tick, Some(label));
+                rendered = true;
+                tick += 1;
                 thread::sleep(Duration::from_millis(140));
+            }
+            if rendered {
+                clear_mascot_block();
             }
         });
 
@@ -189,18 +225,20 @@ impl ActivityAnimation {
     pub fn stop(self) {
         self.stop.store(true, Ordering::Relaxed);
         let _ = self.handle.join();
-        print!("\r{}\r", " ".repeat(48));
         let _ = io::stdout().flush();
     }
 }
 
 pub fn render_mascot_preview() {
-    for _ in 0..16 {
-        print!("\r{} {}", next_mascot_frame().red(), "ClaudeCodeX".bold());
-        let _ = io::stdout().flush();
+    let mut rendered = false;
+    for tick in 0..16 {
+        if rendered {
+            clear_mascot_block();
+        }
+        render_mascot_block(tick, Some("ClaudeCodeX"));
+        rendered = true;
         thread::sleep(Duration::from_millis(110));
     }
-    println!();
 }
 
 pub fn clear_screen() -> Result<()> {
@@ -208,19 +246,39 @@ pub fn clear_screen() -> Result<()> {
     Ok(())
 }
 
-fn next_mascot_frame() -> &'static str {
-    let tick = MASCOT_TICK.fetch_add(1, Ordering::Relaxed);
-    mascot_frame(tick)
+fn render_mascot_block(tick: usize, label: Option<&str>) {
+    let frame = mascot_frame(tick);
+    for (index, line) in frame.iter().enumerate() {
+        if index == 0 {
+            if let Some(label) = label {
+                let label = if label == "ClaudeCodeX" {
+                    label.to_string()
+                } else {
+                    format!("{label}...")
+                };
+                println!("{} {}", line.red(), label.dim());
+                continue;
+            }
+        }
+        println!("{}", line.red());
+    }
+    let _ = io::stdout().flush();
 }
 
-fn mascot_frame(tick: usize) -> &'static str {
-    const FRAMES: [&str; 4] = [
-        r"\  (o_o)  /",
-        r" \ (o_o) / ",
-        r"  \(o_o)/  ",
-        r" / (o_o) \ ",
-    ];
-    FRAMES[tick % FRAMES.len()]
+fn clear_mascot_block() {
+    let _ = execute!(
+        io::stdout(),
+        MoveUp(MASCOT_HEIGHT as u16),
+        Clear(ClearType::FromCursorDown)
+    );
+}
+
+fn mascot_indent() -> String {
+    " ".repeat(MASCOT_WIDTH)
+}
+
+fn mascot_frame(tick: usize) -> &'static [&'static str; MASCOT_HEIGHT] {
+    &MASCOT_FRAMES[tick % MASCOT_FRAMES.len()]
 }
 
 fn repo_name(path: &Path) -> String {
@@ -356,9 +414,10 @@ mod tests {
 
     #[test]
     fn mascot_frames_keep_stable_width() {
-        let width = mascot_frame(0).chars().count();
-        for index in 1..8 {
-            assert_eq!(mascot_frame(index).chars().count(), width);
+        for frame in MASCOT_FRAMES {
+            for line in frame {
+                assert_eq!(line.chars().count(), MASCOT_WIDTH);
+            }
         }
     }
 }
