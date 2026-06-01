@@ -17,12 +17,7 @@ pub struct InstructionFile {
 
 impl ProjectContext {
     pub fn load(workspace: &Path) -> Result<Self> {
-        let candidates = [
-            "AGENTS.md",
-            ".ccx/AGENTS.md",
-            "CLAUDE.md",
-            ".cursor/rules",
-        ];
+        let candidates = ["AGENTS.md", ".ccx/AGENTS.md", "CLAUDE.md", ".cursor/rules"];
 
         let mut instruction_files = Vec::new();
         for candidate in candidates {

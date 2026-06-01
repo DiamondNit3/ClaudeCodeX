@@ -66,7 +66,10 @@ pub fn print_sessions(filter: Option<&str>) -> Result<()> {
 
     for entry in entries {
         let path = entry.path();
-        let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         if let Some(filter) = filter {
             if !id.contains(filter) {
                 continue;

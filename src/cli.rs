@@ -18,9 +18,7 @@ pub enum Commands {
         task: String,
     },
     #[command(about = "List resumable sessions or inspect one session id")]
-    Resume {
-        session: Option<String>,
-    },
+    Resume { session: Option<String> },
     #[command(about = "Inspect or initialize configuration")]
     Config {
         #[command(subcommand)]

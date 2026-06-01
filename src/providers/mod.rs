@@ -90,7 +90,10 @@ impl ProviderRegistry {
     }
 
     pub fn summaries(&self) -> Vec<ProviderSummary> {
-        self.providers.values().map(|provider| provider.summary()).collect()
+        self.providers
+            .values()
+            .map(|provider| provider.summary())
+            .collect()
     }
 }
 

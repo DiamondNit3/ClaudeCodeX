@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -67,7 +66,8 @@ impl AppConfig {
 
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read config at {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("failed to parse config at {}", path.display()))
+        toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config at {}", path.display()))
     }
 
     pub fn write_default_config() -> Result<PathBuf> {
@@ -81,17 +81,46 @@ impl AppConfig {
     }
 
     pub fn config_path() -> Result<PathBuf> {
-        Ok(Self::project_dirs()?.config_dir().join("config.toml"))
+        Ok(config_root()?.join("config.toml"))
     }
 
     pub fn data_dir() -> Result<PathBuf> {
-        Ok(Self::project_dirs()?.data_dir().to_path_buf())
+        Ok(data_root()?)
+    }
+}
+
+fn config_root() -> Result<PathBuf> {
+    if cfg!(windows) {
+        let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
+        return Ok(PathBuf::from(appdata)
+            .join(username_segment())
+            .join("ClaudeCodeX"));
     }
 
-    fn project_dirs() -> Result<ProjectDirs> {
-        ProjectDirs::from("com", "DiamondNit3", "ClaudeCodeX")
-            .context("could not determine platform config directory")
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".config").join("ClaudeCodeX"))
+}
+
+fn data_root() -> Result<PathBuf> {
+    if cfg!(windows) {
+        let appdata = std::env::var_os("APPDATA").context("APPDATA is not set")?;
+        return Ok(PathBuf::from(appdata)
+            .join(username_segment())
+            .join("ClaudeCodeX")
+            .join("data"));
     }
+
+    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("ClaudeCodeX"))
+}
+
+fn username_segment() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "username".to_string())
 }
 
 impl Default for AppConfig {

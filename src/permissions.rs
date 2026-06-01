@@ -82,7 +82,11 @@ impl PermissionEngine {
         if normalized.starts_with(&workspace) {
             Ok(())
         } else {
-            bail!("path {} is outside workspace {}", path.display(), workspace.display())
+            bail!(
+                "path {} is outside workspace {}",
+                path.display(),
+                workspace.display()
+            )
         }
     }
 

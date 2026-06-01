@@ -126,7 +126,9 @@ async fn run_agent_turn(
     tools: &ToolRegistry,
     user_input: &str,
 ) -> Result<String> {
-    state.session.append("user", EventText { text: user_input })?;
+    state
+        .session
+        .append("user", EventText { text: user_input })?;
     state.transcript.push(ModelMessage {
         role: MessageRole::User,
         content: user_input.to_string(),
@@ -144,7 +146,12 @@ async fn run_agent_turn(
             })
             .await?;
 
-        state.session.append("assistant", EventText { text: &response.text })?;
+        state.session.append(
+            "assistant",
+            EventText {
+                text: &response.text,
+            },
+        )?;
         state.transcript.push(ModelMessage {
             role: MessageRole::Assistant,
             content: response.text.clone(),
@@ -222,9 +229,15 @@ fn handle_slash_command(
                     providers.get(provider)?;
                     state.selected_provider = provider.to_string();
                     state.selected_model = model.to_string();
-                    println!("model: {} {}", state.selected_provider, state.selected_model);
+                    println!(
+                        "model: {} {}",
+                        state.selected_provider, state.selected_model
+                    );
                 }
-                _ => println!("model: {} {}", state.selected_provider, state.selected_model),
+                _ => println!(
+                    "model: {} {}",
+                    state.selected_provider, state.selected_model
+                ),
             }
             Ok(false)
         }

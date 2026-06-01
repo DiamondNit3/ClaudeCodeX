@@ -62,7 +62,13 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
             "shell" => self.shell(&call.arguments).await,
             "git_status" => self.git_status().await,
             "git_diff" => self.git_diff().await,
-            other => bail!("unknown tool `{other}`"),
+            other => {
+                return ToolResult {
+                    tool: tool_name,
+                    success: false,
+                    content: format!("unknown tool `{other}`"),
+                }
+            }
         };
 
         match result {
@@ -142,7 +148,10 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
         let root = self.resolve(&path)?;
         let mut matches = Vec::new();
 
-        for entry in WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
             if !entry.file_type().is_file() {
                 continue;
             }
