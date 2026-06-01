@@ -77,6 +77,16 @@ Use tools when needed to inspect or modify the workspace. After tool results, co
         ]
     }
 
+    pub fn read_only_tool_specs() -> Vec<ToolSpec> {
+        vec![
+            ToolSpec::new("read_file", "Read a UTF-8 text file from the workspace"),
+            ToolSpec::new("glob", "List workspace files matching a glob"),
+            ToolSpec::new("grep", "Search workspace files for text"),
+            ToolSpec::new("git_status", "Show git status"),
+            ToolSpec::new("git_diff", "Show git diff"),
+        ]
+    }
+
     pub async fn execute(&self, call: ToolCall) -> ToolResult {
         let tool_name = call.tool.clone();
         if let Err(error) = self.hooks.run_pre_tool(&self.workspace, &call) {

@@ -52,7 +52,7 @@ pub async fn run_interactive(
             continue;
         }
         if input.starts_with('/') {
-            if handle_slash_command(input, &mut state, &providers)? {
+            if handle_slash_command(input, &mut state, &providers).await? {
                 break;
             }
             render_footer(&state);
@@ -106,7 +106,7 @@ pub async fn run_resume(
             continue;
         }
         if input.starts_with('/') {
-            if handle_slash_command(input, &mut state, &providers)? {
+            if handle_slash_command(input, &mut state, &providers).await? {
                 break;
             }
             render_footer(&state);
@@ -217,6 +217,24 @@ impl AgentState {
                         self.transcript.push(ModelMessage {
                             role: MessageRole::System,
                             content: format!("Session summary so far:\n{text}"),
+                        });
+                    }
+                }
+                "subagent_result" => {
+                    let kind = event
+                        .payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("subagent");
+                    let task = event
+                        .payload
+                        .get("task")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if let Some(report) = event.payload.get("report").and_then(|v| v.as_str()) {
+                        self.transcript.push(ModelMessage {
+                            role: MessageRole::System,
+                            content: format!("Subagent `{kind}` report for `{task}`:\n{report}"),
                         });
                     }
                 }
@@ -427,7 +445,7 @@ async fn run_agent_turn(
     )
 }
 
-fn handle_slash_command(
+async fn handle_slash_command(
     input: &str,
     state: &mut AgentState,
     providers: &ProviderRegistry,
@@ -529,7 +547,23 @@ fn handle_slash_command(
         "/subagent" => {
             let kind = parts.next().unwrap_or("plan");
             let task = parts.collect::<Vec<_>>().join(" ");
-            crate::subagents::run_subagent(&state.context.workspace, kind, &task)?;
+            let report = crate::subagents::run_subagent(
+                &state.config,
+                providers,
+                state.context.workspace.clone(),
+                kind,
+                &task,
+                true,
+            )
+            .await?;
+            state.session.append("subagent_result", &report)?;
+            state.transcript.push(ModelMessage {
+                role: MessageRole::System,
+                content: format!(
+                    "Subagent `{}` report for `{}`:\n{}",
+                    report.kind, report.task, report.report
+                ),
+            });
             Ok(false)
         }
         "/diff" => {

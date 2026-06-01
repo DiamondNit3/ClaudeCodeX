@@ -114,7 +114,7 @@ JSONL keeps sessions append-only, streamable, and easy to inspect.
 
 - `ccx review` and `/review` inspect diffs for common risk patterns.
 - `ccx skills` and `/skills` discover Markdown workflow skills from `.ccx/skills` and the user data directory.
-- `ccx subagent` and `/subagent` provide deterministic helper roles for search, review, test-debug, and planning.
+- `ccx subagent` and `/subagent` run bounded model-backed helper agents for search, review, test-debug, and planning. They use the configured model/provider, receive role-specific prompts, and are limited to read-only tools.
 - `ccx task` tracks background task metadata and logs.
 - `ccx bench` emits benchmark smoke checks as JSON.
 - `ccx release-check` prints the release verification checklist.

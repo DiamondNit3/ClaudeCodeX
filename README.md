@@ -19,10 +19,10 @@ This repository contains the first Rust implementation pass:
 - JSONL session logging, resume listing, and real context compaction
 - MCP server config and tool visibility plumbing
 - animated terminal mascot for activity feedback
-- review mode, workflow skill discovery, helper subagents, background task registry, benchmark smoke checks, and release checks
+- review mode, workflow skill discovery, model-backed read-only subagents, background task registry, benchmark smoke checks, and release checks
 - small, transparent base prompt
 
-Full MCP invocation, richer provider-native streaming coverage, parallel model subagents, and rich ratatui rendering are planned next.
+Full MCP invocation, richer provider-native streaming coverage, parallel subagent execution, and rich ratatui rendering are planned next.
 
 ## Commands
 

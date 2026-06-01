@@ -35,7 +35,7 @@
 
 ## Milestone 5: Advanced Agentics
 
-- deterministic helper subagents
+- bounded model-backed read-only subagents
 - review mode
 - reusable workflow skills
 - background tasks

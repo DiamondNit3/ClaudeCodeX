@@ -43,7 +43,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: TaskCommand,
     },
-    #[command(about = "Run a deterministic helper subagent")]
+    #[command(about = "Run a bounded model-backed helper subagent")]
     Subagent {
         kind: String,
         #[arg(required = true)]

@@ -90,7 +90,17 @@ async fn main() -> Result<()> {
             TaskCommand::Show { id } => tasks::show_task(&id),
             TaskCommand::Cancel { id } => tasks::cancel_task(&id),
         },
-        Commands::Subagent { kind, task } => subagents::run_subagent(&workspace, &kind, &task),
+        Commands::Subagent { kind, task } => {
+            let config = AppConfig::load_or_default()?;
+            let registry = ProviderRegistry::from_config(&config)?;
+            let report =
+                subagents::run_subagent(&config, &registry, workspace, &kind, &task, false).await?;
+            println!(
+                "subagent: {}  tool calls: {}\n{}",
+                report.kind, report.tool_calls, report.report
+            );
+            Ok(())
+        }
         Commands::Bench => bench::run_bench(&workspace),
         Commands::ReleaseCheck => release::print_release_check(),
         Commands::Doctor => {
