@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
+    cursor::{MoveTo, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute, queue,
     style::{Print, Stylize},
@@ -12,8 +12,30 @@ use crossterm::{
 use std::io::{self, Write};
 use std::panic;
 use std::sync::Once;
+use std::time::Duration;
 
 static PANIC_HOOK: Once = Once::new();
+const MASCOT_HEIGHT: usize = 4;
+const MASCOT_FRAMES: [[&str; MASCOT_HEIGHT]; 3] = [
+    [
+        r"\  _    _  /",
+        r" \(o)--(o)/ ",
+        r"  /  ==  \  ",
+        r" /_/    \_\ ",
+    ],
+    [
+        r" \ _    _ / ",
+        r"  (o)--(o)  ",
+        r"  /  ==  \  ",
+        r" /_/    \_\ ",
+    ],
+    [
+        r"  _      _  ",
+        r" (o)--(o)   ",
+        r" /  ==  \   ",
+        r"/_/    \_\  ",
+    ],
+];
 
 #[derive(Debug, Clone)]
 pub struct FullscreenSnapshot {
@@ -47,6 +69,7 @@ pub struct FullscreenUi {
     input: InputBuffer,
     status: String,
     scroll: usize,
+    tick: usize,
     active: bool,
 }
 
@@ -54,12 +77,18 @@ impl FullscreenUi {
     pub fn enter() -> Result<Self> {
         install_panic_hook();
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            Clear(ClearType::All),
+            Show
+        )?;
         Ok(Self {
             entries: Vec::new(),
             input: InputBuffer::default(),
             status: "idle".to_string(),
             scroll: 0,
+            tick: 0,
             active: true,
         })
     }
@@ -88,7 +117,7 @@ impl FullscreenUi {
     pub fn draw(&mut self, snapshot: &FullscreenSnapshot) -> Result<()> {
         let (width, height) = terminal::size().unwrap_or((100, 30));
         let mut stdout = io::stdout();
-        queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+        queue!(stdout, MoveTo(0, 0))?;
         self.draw_header(&mut stdout, snapshot, width)?;
         self.draw_transcript(&mut stdout, width, height)?;
         self.draw_input(&mut stdout, snapshot, width, height)?;
@@ -100,10 +129,14 @@ impl FullscreenUi {
         self.input.clear();
         loop {
             self.draw(snapshot)?;
-            if let Event::Key(key) = event::read()? {
-                if let Some(result) = self.handle_key(key) {
-                    return Ok(result);
+            if event::poll(Duration::from_millis(120))? {
+                if let Event::Key(key) = event::read()? {
+                    if let Some(result) = self.handle_key(key) {
+                        return Ok(result);
+                    }
                 }
+            } else {
+                self.tick = self.tick.wrapping_add(1);
             }
         }
     }
@@ -191,13 +224,14 @@ impl FullscreenUi {
         snapshot: &FullscreenSnapshot,
         width: u16,
     ) -> Result<()> {
+        let mascot = mascot_frame(self.tick);
         let title = format!(
-            " ClaudeCodeX {}  {}:{} ",
-            snapshot.version, snapshot.provider, snapshot.model
+            "{}  ClaudeCodeX {}  {}:{} ",
+            mascot[0], snapshot.version, snapshot.provider, snapshot.model
         );
         let meta = format!(
-            " effort {}  mode {}  permissions {} ",
-            snapshot.effort, snapshot.mode, snapshot.permissions
+            "{}  effort {}  mode {}  permissions {} ",
+            mascot[1], snapshot.effort, snapshot.mode, snapshot.permissions
         );
         queue!(
             stdout,
@@ -208,7 +242,8 @@ impl FullscreenUi {
             Print(
                 fill_line(
                     &format!(
-                        " {}  {} instruction file{}  session {} ",
+                        "{}  {}  {} instruction file{}  session {} ",
+                        mascot[2],
                         snapshot.workspace,
                         snapshot.context_files,
                         if snapshot.context_files == 1 { "" } else { "s" },
@@ -219,25 +254,27 @@ impl FullscreenUi {
                 .dark_grey()
             ),
             Print("\r\n"),
+            Print(fill_line(&format!("{}  {}", mascot[3], self.status), width).dark_grey()),
+            Print("\r\n"),
             Print("─".repeat(width as usize).dark_grey())
         )?;
         Ok(())
     }
 
     fn draw_transcript<W: Write>(&self, stdout: &mut W, width: u16, height: u16) -> Result<()> {
-        let top = 4u16;
+        let top = 5u16;
         let input_height = 4u16;
         let available = height.saturating_sub(top + input_height).max(1);
         let lines = self.transcript_lines(width.saturating_sub(4).max(20) as usize);
         let visible_count = available as usize;
         let end = lines.len().saturating_sub(self.scroll);
         let start = end.saturating_sub(visible_count);
-        for (row, line) in lines[start..end].iter().enumerate() {
-            queue!(
-                stdout,
-                MoveTo(0, top + row as u16),
-                Print(truncate_to_width(line, width as usize))
-            )?;
+        for row in 0..available {
+            let line = lines
+                .get(start + row as usize)
+                .map(String::as_str)
+                .unwrap_or("");
+            queue!(stdout, MoveTo(0, top + row), Print(fill_line(line, width)))?;
         }
         Ok(())
     }
@@ -302,6 +339,10 @@ impl FullscreenUi {
         }
         lines
     }
+}
+
+fn mascot_frame(tick: usize) -> &'static [&'static str; MASCOT_HEIGHT] {
+    &MASCOT_FRAMES[tick % MASCOT_FRAMES.len()]
 }
 
 impl Drop for FullscreenUi {
@@ -454,5 +495,12 @@ mod tests {
     #[test]
     fn wrap_text_splits_words_across_lines() {
         assert_eq!(wrap_text("hello world", 7), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn mascot_frames_keep_stable_height() {
+        for frame in MASCOT_FRAMES {
+            assert_eq!(frame.len(), MASCOT_HEIGHT);
+        }
     }
 }

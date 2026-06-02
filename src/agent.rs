@@ -462,7 +462,7 @@ async fn handle_fullscreen_slash_command(
             Ok(false)
         }
         "/mascot" => {
-            screen.push_system("The ClaudeCodeX activity mascot is shown in line mode and during non-full-screen activity. Full-screen mode keeps the display stable for editing.");
+            screen.push_system("The animated crab is shown in the full-screen header and updates while the input box is waiting for keys.");
             Ok(false)
         }
         other => {
