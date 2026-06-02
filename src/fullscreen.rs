@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::{
     cursor::{MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute, queue,
     style::{Print, Stylize},
     terminal::{
@@ -150,6 +150,9 @@ impl FullscreenUi {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<FullscreenInput> {
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return None;
+        }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(FullscreenInput::Exit)
@@ -474,6 +477,7 @@ fn wrap_text(value: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEventState;
 
     #[test]
     fn input_buffer_edits_at_cursor() {
@@ -485,6 +489,23 @@ mod tests {
         assert_eq!(input.value(), "abc");
         input.backspace();
         assert_eq!(input.value(), "ac");
+    }
+
+    #[test]
+    fn ignores_key_release_events_for_text_input() {
+        let mut ui = FullscreenUi {
+            entries: Vec::new(),
+            input: InputBuffer::default(),
+            status: "idle".to_string(),
+            scroll: 0,
+            tick: 0,
+            active: false,
+        };
+        ui.handle_key(test_key(KeyCode::Char('h'), KeyEventKind::Press));
+        ui.handle_key(test_key(KeyCode::Char('h'), KeyEventKind::Release));
+        ui.handle_key(test_key(KeyCode::Char('i'), KeyEventKind::Press));
+        ui.handle_key(test_key(KeyCode::Char('i'), KeyEventKind::Release));
+        assert_eq!(ui.input.value(), "hi");
     }
 
     #[test]
@@ -501,6 +522,15 @@ mod tests {
     fn mascot_frames_keep_stable_height() {
         for frame in MASCOT_FRAMES {
             assert_eq!(frame.len(), MASCOT_HEIGHT);
+        }
+    }
+
+    fn test_key(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+            kind,
+            state: KeyEventState::empty(),
         }
     }
 }
