@@ -57,6 +57,7 @@ pub struct FooterInfo<'a> {
     pub model: &'a str,
     pub effort: &'a str,
     pub permissions: &'a str,
+    pub mode: &'a str,
     pub branch: &'a str,
     pub repo_state: &'a str,
     pub session_short: &'a str,
@@ -106,10 +107,11 @@ pub fn render_header(info: HeaderInfo<'_>) {
 
 pub fn render_footer(info: FooterInfo<'_>) {
     println!(
-        "{} | effort {} | {} | {} | {} | session {}",
+        "{} | effort {} | {} | mode {} | {} | {} | session {}",
         format!("{}:{}", info.provider, info.model).cyan(),
         info.effort.magenta(),
         info.permissions.yellow(),
+        info.mode.cyan(),
         info.branch,
         color_repo_state(info.repo_state),
         info.session_short
@@ -160,6 +162,9 @@ pub fn render_grouped_help() {
     println!("{}", "Session".bold());
     println!("  /session       show session path");
     println!("  /compact       append compaction marker");
+    println!("  /plan          turn plan mode on, off, or show status");
+    println!("  /approve       implement the pending plan");
+    println!("  /reject        discard the pending plan");
     println!("  /mascot        preview terminal mascot");
     println!("  /clear         clear screen");
     println!("  /exit          quit");

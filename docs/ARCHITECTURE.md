@@ -71,6 +71,12 @@ Before each turn, ClaudeCodeX adds likely relevant files from explicit task path
 
 Read-only batch tool calls are executed concurrently. Repeated grep, git status, and git diff results are cached inside the current tool registry for the session.
 
+## Plan Mode
+
+Interactive sessions support an approval-gated plan mode. `/plan on` changes normal user turns into planning turns, stores the generated plan as pending session state, and tells the model to inspect only with read-only tools. The harness enforces that boundary by blocking mutating tool calls during planning, so this is not only prompt-level guidance.
+
+`/approve` switches back to agent mode and runs the original task with the approved plan attached. `/reject` clears the pending plan without implementation. Pending plans and mode transitions are written to the JSONL session log so resumed sessions can recover the current planning state.
+
 ## Permissions
 
 Permission profiles are enforced before tool execution:

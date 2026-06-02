@@ -53,14 +53,14 @@ pub async fn run_interactive(
             continue;
         }
         if input.starts_with('/') {
-            if handle_slash_command(input, &mut state, &providers).await? {
+            if handle_slash_command(input, &mut state, &providers, &tools).await? {
                 break;
             }
             render_footer(&state);
             continue;
         }
 
-        let output = run_agent_turn(&mut state, &providers, &tools, input, true).await?;
+        let output = run_user_turn(&mut state, &providers, &tools, input, true).await?;
         if !output.trim().is_empty() {
             println!("{output}");
         }
@@ -107,13 +107,13 @@ pub async fn run_resume(
             continue;
         }
         if input.starts_with('/') {
-            if handle_slash_command(input, &mut state, &providers).await? {
+            if handle_slash_command(input, &mut state, &providers, &tools).await? {
                 break;
             }
             render_footer(&state);
             continue;
         }
-        let output = run_agent_turn(&mut state, &providers, &tools, input, true).await?;
+        let output = run_user_turn(&mut state, &providers, &tools, input, true).await?;
         if !output.trim().is_empty() {
             println!("{output}");
         }
@@ -145,10 +145,78 @@ pub async fn run_exec(
     );
     let mut state = AgentState::new(config, context, session);
     state.append_metadata()?;
-    let output = run_agent_turn(&mut state, &providers, &tools, &task, false).await?;
+    let output = run_agent_turn(
+        &mut state,
+        &providers,
+        &tools,
+        &task,
+        false,
+        TurnMode::Implement,
+    )
+    .await?;
     println!("{output}");
     eprintln!("session: {}", state.session.path().display());
     Ok(())
+}
+
+async fn run_user_turn(
+    state: &mut AgentState,
+    providers: &ProviderRegistry,
+    tools: &ToolRegistry,
+    input: &str,
+    render_ui: bool,
+) -> Result<String> {
+    if state.work_mode == WorkMode::Plan {
+        return run_plan_mode_turn(state, providers, tools, input, render_ui).await;
+    }
+    run_agent_turn(
+        state,
+        providers,
+        tools,
+        input,
+        render_ui,
+        TurnMode::Implement,
+    )
+    .await
+}
+
+async fn run_plan_mode_turn(
+    state: &mut AgentState,
+    providers: &ProviderRegistry,
+    tools: &ToolRegistry,
+    input: &str,
+    render_ui: bool,
+) -> Result<String> {
+    if state.pending_plan.is_some() {
+        return Ok(
+            "A plan is already waiting for approval. Use `/approve` to implement it, `/reject` to discard it, or `/plan off` to leave plan mode."
+                .to_string(),
+        );
+    }
+
+    let plan = run_agent_turn(
+        state,
+        providers,
+        tools,
+        input,
+        render_ui,
+        TurnMode::PlanOnly,
+    )
+    .await?;
+    state.pending_plan = Some(PendingPlan {
+        task: input.to_string(),
+        plan: plan.clone(),
+    });
+    state.session.append(
+        "pending_plan",
+        PlanEvent {
+            task: input,
+            plan: &plan,
+        },
+    )?;
+    Ok(format!(
+        "{plan}\n\nPlan saved. Use `/approve` to implement it or `/reject` to discard it."
+    ))
 }
 
 struct AgentState {
@@ -158,8 +226,37 @@ struct AgentState {
     selected_provider: String,
     selected_model: String,
     effort_override: Option<EffortLevel>,
+    work_mode: WorkMode,
+    pending_plan: Option<PendingPlan>,
     transcript: Vec<ModelMessage>,
     preview: Option<PreviewServer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkMode {
+    Agent,
+    Plan,
+}
+
+impl WorkMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingPlan {
+    task: String,
+    plan: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TurnMode {
+    Implement,
+    PlanOnly,
 }
 
 impl AgentState {
@@ -173,6 +270,8 @@ impl AgentState {
             selected_provider,
             selected_model: config.default_model.clone(),
             effort_override: None,
+            work_mode: WorkMode::Agent,
+            pending_plan: None,
             config,
             context,
             session,
@@ -188,6 +287,7 @@ impl AgentState {
                 "provider": &self.selected_provider,
                 "model": &self.selected_model,
                 "effort": self.current_effort().as_str(),
+                "work_mode": self.work_mode.as_str(),
                 "permission_profile": &self.config.permission_profile,
                 "workspace": &self.context.workspace,
             }),
@@ -207,11 +307,41 @@ impl AgentState {
                     if let Some(effort) = event.payload.get("effort").and_then(|v| v.as_str()) {
                         self.effort_override = effort.parse().ok();
                     }
+                    if let Some(work_mode) = event.payload.get("work_mode").and_then(|v| v.as_str())
+                    {
+                        self.work_mode = parse_work_mode(work_mode);
+                    }
                 }
                 "effort" => {
                     if let Some(effort) = event.payload.get("text").and_then(|v| v.as_str()) {
                         self.effort_override = effort.parse().ok();
                     }
+                }
+                "work_mode" => {
+                    if let Some(mode) = event.payload.get("text").and_then(|v| v.as_str()) {
+                        self.work_mode = parse_work_mode(mode);
+                    }
+                }
+                "pending_plan" => {
+                    let task = event
+                        .payload
+                        .get("task")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    let plan = event
+                        .payload
+                        .get("plan")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if !task.is_empty() && !plan.is_empty() {
+                        self.pending_plan = Some(PendingPlan {
+                            task: task.to_string(),
+                            plan: plan.to_string(),
+                        });
+                    }
+                }
+                "plan_resolved" => {
+                    self.pending_plan = None;
                 }
                 "compact_summary" => {
                     if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
@@ -343,6 +473,7 @@ async fn run_agent_turn(
     tools: &ToolRegistry,
     user_input: &str,
     render_ui: bool,
+    turn_mode: TurnMode,
 ) -> Result<String> {
     state
         .session
@@ -369,6 +500,12 @@ async fn run_agent_turn(
             user_input,
         );
         let mut messages = state.system_messages();
+        if matches!(turn_mode, TurnMode::PlanOnly) {
+            messages.push(ModelMessage {
+                role: MessageRole::System,
+                content: plan_mode_prompt().to_string(),
+            });
+        }
         if let Some(relevant_context) = selected_file_context(&state.context.workspace, user_input)
         {
             messages.push(ModelMessage {
@@ -383,7 +520,11 @@ async fn run_agent_turn(
             messages,
             profile: turn_profile,
             effort: turn_effort,
-            tools: ToolRegistry::native_tool_specs(),
+            tools: if matches!(turn_mode, TurnMode::PlanOnly) {
+                ToolRegistry::read_only_tool_specs()
+            } else {
+                ToolRegistry::native_tool_specs()
+            },
         };
         let mut streamed_any = false;
         let response_result = if provider.capabilities().streaming {
@@ -436,7 +577,7 @@ async fn run_agent_turn(
         } else {
             response.tool_calls
         };
-        if calls.is_empty() {
+        if calls.is_empty() && matches!(turn_mode, TurnMode::Implement) {
             if let Some(call) = infer_file_write(user_input, &response.text) {
                 state.session.append("inferred_tool_call", &call)?;
                 calls.push(call);
@@ -450,7 +591,8 @@ async fn run_agent_turn(
             });
         }
 
-        let tool_results = execute_tool_calls(state, tools, user_input, calls, render_ui).await?;
+        let tool_results =
+            execute_tool_calls(state, tools, user_input, calls, render_ui, turn_mode).await?;
 
         state.transcript.push(ModelMessage {
             role: MessageRole::Tool,
@@ -485,6 +627,7 @@ async fn handle_slash_command(
     input: &str,
     state: &mut AgentState,
     providers: &ProviderRegistry,
+    tools: &ToolRegistry,
 ) -> Result<bool> {
     let mut parts = input.split_whitespace();
     let command = parts.next().unwrap_or_default();
@@ -525,6 +668,91 @@ async fn handle_slash_command(
                     println!("effort: {parsed}");
                 }
                 None => println!("effort: {}", state.current_effort()),
+            }
+            Ok(false)
+        }
+        "/plan" => {
+            let value = parts.next().unwrap_or("on");
+            match value {
+                "on" => {
+                    state.work_mode = WorkMode::Plan;
+                    state.session.append(
+                        "work_mode",
+                        EventText {
+                            text: state.work_mode.as_str(),
+                        },
+                    )?;
+                    println!("plan mode: on");
+                }
+                "off" => {
+                    state.work_mode = WorkMode::Agent;
+                    state.pending_plan = None;
+                    state.session.append(
+                        "work_mode",
+                        EventText {
+                            text: state.work_mode.as_str(),
+                        },
+                    )?;
+                    state
+                        .session
+                        .append("plan_resolved", EventText { text: "off" })?;
+                    println!("plan mode: off");
+                }
+                "status" => {
+                    println!("plan mode: {}", state.work_mode.as_str());
+                    if let Some(plan) = &state.pending_plan {
+                        println!("pending plan for: {}", plan.task);
+                    }
+                }
+                other => {
+                    println!(
+                        "unknown plan option `{other}`; use /plan on, /plan off, or /plan status"
+                    );
+                }
+            }
+            Ok(false)
+        }
+        "/approve" => {
+            let Some(plan) = state.pending_plan.take() else {
+                println!("no pending plan");
+                return Ok(false);
+            };
+            state
+                .session
+                .append("plan_resolved", EventText { text: "approved" })?;
+            state.work_mode = WorkMode::Agent;
+            state.session.append(
+                "work_mode",
+                EventText {
+                    text: state.work_mode.as_str(),
+                },
+            )?;
+            let approved_task = format!(
+                "Implement this approved plan for the original task.\n\nOriginal task:\n{}\n\nApproved plan:\n{}",
+                plan.task, plan.plan
+            );
+            let output = run_agent_turn(
+                state,
+                providers,
+                tools,
+                &approved_task,
+                true,
+                TurnMode::Implement,
+            )
+            .await?;
+            if !output.trim().is_empty() {
+                println!("{output}");
+            }
+            Ok(false)
+        }
+        "/reject" => {
+            if state.pending_plan.take().is_some() {
+                state
+                    .session
+                    .append("plan_resolved", EventText { text: "rejected" })?;
+                println!("pending plan discarded");
+            } else {
+                println!("no pending plan");
             }
             Ok(false)
         }
@@ -637,7 +865,7 @@ fn render_header(state: &AgentState) {
         workspace: &state.context.workspace,
         context_files: state.context.instruction_files.len(),
         session_short: &session_short,
-        mode: "interactive",
+        mode: state.work_mode.as_str(),
     });
 }
 
@@ -650,6 +878,7 @@ fn render_footer(state: &AgentState) {
         model: &state.selected_model,
         effort: state.current_effort().as_str(),
         permissions: &state.config.permission_profile,
+        mode: state.work_mode.as_str(),
         branch: &branch,
         repo_state: &repo_state,
         session_short: &session_short,
@@ -658,6 +887,13 @@ fn render_footer(state: &AgentState) {
 
 fn short_session_id(state: &AgentState) -> String {
     state.session.id.to_string().chars().take(8).collect()
+}
+
+fn parse_work_mode(value: &str) -> WorkMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "plan" | "planning" => WorkMode::Plan,
+        _ => WorkMode::Agent,
+    }
 }
 
 fn git_branch(workspace: &PathBuf) -> String {
@@ -729,6 +965,7 @@ async fn execute_tool_calls(
     user_input: &str,
     mut calls: Vec<ToolCall>,
     render_ui: bool,
+    turn_mode: TurnMode,
 ) -> Result<Vec<ToolResult>> {
     for call in &mut calls {
         normalize_local_tool_path(user_input, call);
@@ -737,6 +974,35 @@ async fn execute_tool_calls(
             ui::working_for_tool(call);
             ui::render_tool_call(call);
         }
+    }
+
+    if matches!(turn_mode, TurnMode::PlanOnly) {
+        let mut results = Vec::new();
+        let mut allowed_calls = Vec::new();
+        for call in calls {
+            if is_read_only_call(&call) {
+                allowed_calls.push(call);
+            } else {
+                results.push(blocked_plan_tool_result(call));
+            }
+        }
+        let allowed_results = if allowed_calls.len() > 1 {
+            join_all(allowed_calls.into_iter().map(|call| tools.execute(call))).await
+        } else {
+            let mut tool_results = Vec::new();
+            for call in allowed_calls {
+                tool_results.push(tools.execute(call).await);
+            }
+            tool_results
+        };
+        results.extend(allowed_results);
+        for result in &results {
+            if render_ui {
+                ui::render_tool_result(result);
+            }
+            state.session.append("tool_result", result)?;
+        }
+        return Ok(results);
     }
 
     let results = if calls.iter().all(is_read_only_call) && calls.len() > 1 {
@@ -756,6 +1022,18 @@ async fn execute_tool_calls(
         state.session.append("tool_result", result)?;
     }
     Ok(results)
+}
+
+fn blocked_plan_tool_result(call: ToolCall) -> ToolResult {
+    ToolResult {
+        tool: call.tool,
+        call_id: call.call_id,
+        success: false,
+        content: "blocked by plan mode: only read-only tools are allowed before `/approve`"
+            .to_string(),
+        full_content: None,
+        truncated: false,
+    }
 }
 
 fn is_read_only_call(call: &ToolCall) -> bool {
@@ -975,6 +1253,16 @@ Project instructions:
     prompt
 }
 
+fn plan_mode_prompt() -> &'static str {
+    r#"PLAN MODE is active.
+
+Create a concrete implementation plan only. Do not implement the task.
+You may inspect the workspace with read-only tools: read_file, glob, grep, git_status, git_diff.
+Do not call write_file, edit_file, shell, or any mutating tool.
+The plan should include scope, files likely to change, implementation steps, risks, and verification.
+End with a short approval instruction telling the user to run /approve to implement or /reject to discard."#
+}
+
 fn infer_file_write(user_input: &str, response: &str) -> Option<ToolCall> {
     let path = infer_target_path(user_input)?;
     let content = clean_file_content(response);
@@ -1101,6 +1389,12 @@ This is not a private provider prompt clone. Use your native strengths, but foll
 #[derive(Serialize)]
 struct EventText<T: Serialize> {
     text: T,
+}
+
+#[derive(Serialize)]
+struct PlanEvent<'a> {
+    task: &'a str,
+    plan: &'a str,
 }
 
 #[cfg(test)]

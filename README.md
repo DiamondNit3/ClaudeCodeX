@@ -19,7 +19,7 @@ This repository contains the first Rust implementation pass:
 - JSONL session logging, resume listing, and real context compaction
 - MCP server config and tool visibility plumbing
 - animated terminal mascot for activity feedback
-- review mode, workflow skill discovery, model-backed read-only subagents, background task registry, benchmark smoke checks, and release checks
+- review mode, approval-gated plan mode, workflow skill discovery, model-backed read-only subagents, background task registry, benchmark smoke checks, and release checks
 - context budgeting, relevant-file hints, auto effort selection, and simple model routing
 - small, transparent base prompt
 
@@ -63,9 +63,14 @@ Interactive slash commands include grouped session, model, workspace, and securi
 /permissions
 /session
 /compact
+/plan
+/approve
+/reject
 /mascot
 /exit
 ```
+
+Plan mode is an interactive approval gate. Use `/plan on`, enter the task, review the generated implementation plan, then run `/approve` to execute it or `/reject` to discard it. While a plan is being created, the harness blocks mutating tool calls and only allows read-only inspection tools.
 
 ## Configuration
 
