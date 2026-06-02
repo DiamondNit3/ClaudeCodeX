@@ -42,12 +42,13 @@ pub async fn run_interactive(
     render_header(&state);
 
     loop {
-        print!("{}", ui::prompt());
+        print!("{}", ui::prompt_box(state.work_mode.as_str()));
         io::stdout().flush()?;
         let mut input = String::new();
         if io::stdin().read_line(&mut input)? == 0 {
             break;
         }
+        ui::close_prompt_box();
         let input = input.trim();
         if input.is_empty() {
             continue;
@@ -96,12 +97,13 @@ pub async fn run_resume(
 
     render_header(&state);
     loop {
-        print!("{}", ui::prompt());
+        print!("{}", ui::prompt_box(state.work_mode.as_str()));
         io::stdout().flush()?;
         let mut input = String::new();
         if io::stdin().read_line(&mut input)? == 0 {
             break;
         }
+        ui::close_prompt_box();
         let input = input.trim();
         if input.is_empty() {
             continue;

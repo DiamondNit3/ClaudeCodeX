@@ -4,7 +4,7 @@ use crossterm::{
     cursor::{MoveTo, MoveUp},
     execute,
     style::Stylize,
-    terminal::{Clear, ClearType},
+    terminal::{self, Clear, ClearType},
 };
 use serde_json::Value;
 use std::io::{self, Write};
@@ -118,8 +118,13 @@ pub fn render_footer(info: FooterInfo<'_>) {
     );
 }
 
-pub fn prompt() -> String {
-    format!("{}", "ccx > ".cyan())
+pub fn prompt_box(mode: &str) -> String {
+    let top = prompt_border_top(mode);
+    format!("{}\n{} ", top.dark_grey(), "│".cyan())
+}
+
+pub fn close_prompt_box() {
+    println!("{}", prompt_border_bottom().dark_grey());
 }
 
 pub fn working_for_tool(call: &ToolCall) {
@@ -421,6 +426,25 @@ fn truncate(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn prompt_border_top(mode: &str) -> String {
+    let label = format!(" ccx · {mode} ");
+    let width = prompt_box_width();
+    let fill = width.saturating_sub(label.chars().count() + 1);
+    format!("╭{label}{}", "─".repeat(fill))
+}
+
+fn prompt_border_bottom() -> String {
+    let width = prompt_box_width();
+    format!("╰{}", "─".repeat(width.saturating_sub(1)))
+}
+
+fn prompt_box_width() -> usize {
+    terminal::size()
+        .map(|(width, _)| usize::from(width))
+        .unwrap_or(80)
+        .clamp(40, 96)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +456,13 @@ mod tests {
                 assert_eq!(line.chars().count(), MASCOT_WIDTH);
             }
         }
+    }
+
+    #[test]
+    fn prompt_borders_have_stable_width() {
+        let top = prompt_border_top("agent");
+        let bottom = prompt_border_bottom();
+        assert_eq!(top.chars().count(), bottom.chars().count());
+        assert!(top.contains("ccx"));
     }
 }

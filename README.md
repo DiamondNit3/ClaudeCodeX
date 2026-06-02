@@ -18,7 +18,7 @@ This repository contains the first Rust implementation pass:
 - project instruction loading from `AGENTS.md`, `.ccx/AGENTS.md`, `CLAUDE.md`, and `.cursor/rules`
 - JSONL session logging, resume listing, and real context compaction
 - MCP server config and tool visibility plumbing
-- animated terminal mascot for activity feedback
+- animated terminal mascot and Codex-style boxed input for activity feedback
 - review mode, approval-gated plan mode, workflow skill discovery, model-backed read-only subagents, background task registry, benchmark smoke checks, and release checks
 - context budgeting, relevant-file hints, auto effort selection, and simple model routing
 - small, transparent base prompt
