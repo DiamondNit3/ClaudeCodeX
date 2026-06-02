@@ -3,6 +3,7 @@ mod bench;
 mod cli;
 mod config;
 mod context;
+mod fullscreen;
 mod hooks;
 mod mcp;
 mod parser;

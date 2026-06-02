@@ -17,6 +17,8 @@
 7. Persist every message, tool call, decision, and result.
 8. Stop when the model reports completion, the user exits, or a permission/blocking condition stops progress.
 
+Interactive sessions launched from a real TTY enter an alternate-screen full-screen UI. Piped stdin/stdout and non-interactive subcommands keep the line-oriented renderer so automation remains scriptable.
+
 ## Provider Boundary
 
 The provider layer exposes a common `ModelProvider` trait while preserving provider-specific request code internally. Each adapter declares capabilities so the runtime can avoid flattening every model into the same behavior.

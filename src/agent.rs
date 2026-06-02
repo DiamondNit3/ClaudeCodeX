@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, EffortLevel, ModelProfile, ToolProtocol};
 use crate::context::ProjectContext;
+use crate::fullscreen::{FullscreenInput, FullscreenSnapshot, FullscreenUi};
 use crate::hooks::HookRunner;
 use crate::parser::parse_model_output;
 use crate::permissions::{PermissionEngine, PermissionProfile};
@@ -12,7 +13,7 @@ use anyhow::{bail, Result};
 use futures_util::future::join_all;
 use serde::Serialize;
 use serde_json::json;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -38,6 +39,10 @@ pub async fn run_interactive(
     );
     let mut state = AgentState::new(config, context, session);
     state.append_metadata()?;
+
+    if should_use_fullscreen() {
+        return run_fullscreen_loop(&mut state, &providers, &tools).await;
+    }
 
     render_header(&state);
 
@@ -94,6 +99,10 @@ pub async fn run_resume(
     );
     let mut state = AgentState::new(config, context, session);
     state.restore_transcript()?;
+
+    if should_use_fullscreen() {
+        return run_fullscreen_loop(&mut state, &providers, &tools).await;
+    }
 
     render_header(&state);
     loop {
@@ -159,6 +168,312 @@ pub async fn run_exec(
     println!("{output}");
     eprintln!("session: {}", state.session.path().display());
     Ok(())
+}
+
+async fn run_fullscreen_loop(
+    state: &mut AgentState,
+    providers: &ProviderRegistry,
+    tools: &ToolRegistry,
+) -> Result<()> {
+    let mut screen = FullscreenUi::enter()?;
+    screen.push_system("Ready. Type /help for commands. Ctrl+C or /exit leaves ClaudeCodeX.");
+
+    loop {
+        screen.set_status("idle");
+        match screen.read_input(&fullscreen_snapshot(state))? {
+            FullscreenInput::Exit => break,
+            FullscreenInput::Submit(input) => {
+                if input == "/clear" {
+                    screen.clear_entries();
+                    continue;
+                }
+                screen.push_user(&input);
+                if input.starts_with('/') {
+                    if handle_fullscreen_slash_command(&input, state, providers, tools, &mut screen)
+                        .await?
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
+                screen.set_status("thinking");
+                screen.draw(&fullscreen_snapshot(state))?;
+                match run_user_turn(state, providers, tools, &input, false).await {
+                    Ok(output) => {
+                        if output.trim().is_empty() {
+                            screen.push_assistant("Done.");
+                        } else {
+                            screen.push_assistant(output);
+                        }
+                    }
+                    Err(error) => {
+                        screen.push_system(format!("error: {error:#}"));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_fullscreen_slash_command(
+    input: &str,
+    state: &mut AgentState,
+    providers: &ProviderRegistry,
+    tools: &ToolRegistry,
+    screen: &mut FullscreenUi,
+) -> Result<bool> {
+    let mut parts = input.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    match command {
+        "/exit" | "/quit" => Ok(true),
+        "/help" => {
+            screen.push_system(fullscreen_help());
+            Ok(false)
+        }
+        "/context" => {
+            screen.push_system(format!(
+                "{}\n{}",
+                state.context.summary(),
+                state.context.render_for_prompt()
+            ));
+            Ok(false)
+        }
+        "/providers" => {
+            screen.push_system(
+                providers
+                    .summaries()
+                    .into_iter()
+                    .map(|summary| summary.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            Ok(false)
+        }
+        "/effort" => {
+            match parts.next() {
+                Some(value) => {
+                    let parsed: EffortLevel = value.parse()?;
+                    state.effort_override = Some(parsed);
+                    state.session.append(
+                        "effort",
+                        EventText {
+                            text: parsed.as_str(),
+                        },
+                    )?;
+                    screen.push_system(format!("effort: {parsed}"));
+                }
+                None => screen.push_system(format!("effort: {}", state.current_effort())),
+            }
+            Ok(false)
+        }
+        "/model" => {
+            let provider = parts.next();
+            let model = parts.next();
+            match (provider, model) {
+                (Some(provider), Some(model)) => {
+                    providers.get(provider)?;
+                    state.selected_provider = provider.to_string();
+                    state.selected_model = model.to_string();
+                    screen.push_system(format!(
+                        "model: {} {}",
+                        state.selected_provider, state.selected_model
+                    ));
+                }
+                _ => screen.push_system(format!(
+                    "model: {} {}",
+                    state.selected_provider, state.selected_model
+                )),
+            }
+            Ok(false)
+        }
+        "/permissions" => {
+            screen.push_system(format!("permissions: {}", state.config.permission_profile));
+            Ok(false)
+        }
+        "/session" => {
+            screen.push_system(state.session.path().display().to_string());
+            Ok(false)
+        }
+        "/compact" => {
+            let summary = compact_transcript(&mut state.transcript);
+            state
+                .session
+                .append("compact_summary", EventText { text: &summary })?;
+            state.session.append_memory("compact_summary", &summary)?;
+            screen.push_system(format!("compacted session context\n{summary}"));
+            Ok(false)
+        }
+        "/plan" => {
+            let value = parts.next().unwrap_or("on");
+            match value {
+                "on" => {
+                    state.work_mode = WorkMode::Plan;
+                    state.session.append(
+                        "work_mode",
+                        EventText {
+                            text: state.work_mode.as_str(),
+                        },
+                    )?;
+                    screen.push_system("plan mode: on");
+                }
+                "off" => {
+                    state.work_mode = WorkMode::Agent;
+                    state.pending_plan = None;
+                    state.session.append(
+                        "work_mode",
+                        EventText {
+                            text: state.work_mode.as_str(),
+                        },
+                    )?;
+                    state
+                        .session
+                        .append("plan_resolved", EventText { text: "off" })?;
+                    screen.push_system("plan mode: off");
+                }
+                "status" => {
+                    let pending = state
+                        .pending_plan
+                        .as_ref()
+                        .map(|plan| format!("\npending plan for: {}", plan.task))
+                        .unwrap_or_default();
+                    screen.push_system(format!("plan mode: {}{pending}", state.work_mode.as_str()));
+                }
+                other => screen.push_system(format!(
+                    "unknown plan option `{other}`; use /plan on, /plan off, or /plan status"
+                )),
+            }
+            Ok(false)
+        }
+        "/approve" => {
+            let Some(plan) = state.pending_plan.take() else {
+                screen.push_system("no pending plan");
+                return Ok(false);
+            };
+            state
+                .session
+                .append("plan_resolved", EventText { text: "approved" })?;
+            state.work_mode = WorkMode::Agent;
+            state.session.append(
+                "work_mode",
+                EventText {
+                    text: state.work_mode.as_str(),
+                },
+            )?;
+            let approved_task = format!(
+                "Implement this approved plan for the original task.\n\nOriginal task:\n{}\n\nApproved plan:\n{}",
+                plan.task, plan.plan
+            );
+            screen.set_status("implementing approved plan");
+            screen.draw(&fullscreen_snapshot(state))?;
+            match run_agent_turn(
+                state,
+                providers,
+                tools,
+                &approved_task,
+                false,
+                TurnMode::Implement,
+            )
+            .await
+            {
+                Ok(output) => screen.push_assistant(if output.trim().is_empty() {
+                    "Approved plan implemented.".to_string()
+                } else {
+                    output
+                }),
+                Err(error) => screen.push_system(format!("error: {error:#}")),
+            }
+            Ok(false)
+        }
+        "/reject" => {
+            if state.pending_plan.take().is_some() {
+                state
+                    .session
+                    .append("plan_resolved", EventText { text: "rejected" })?;
+                screen.push_system("pending plan discarded");
+            } else {
+                screen.push_system("no pending plan");
+            }
+            Ok(false)
+        }
+        "/status" => {
+            screen.push_system(git_status(&state.context.workspace));
+            Ok(false)
+        }
+        "/diff" => {
+            screen.push_system(git_diff(&state.context.workspace));
+            Ok(false)
+        }
+        "/review" => {
+            screen.set_status("running review");
+            screen.draw(&fullscreen_snapshot(state))?;
+            screen.push_system(run_ccx_command(&state.context.workspace, &["review"]));
+            Ok(false)
+        }
+        "/skills" => {
+            screen.push_system(run_ccx_command(&state.context.workspace, &["skills"]));
+            Ok(false)
+        }
+        "/subagent" => {
+            let kind = parts.next().unwrap_or("plan");
+            let task = parts.collect::<Vec<_>>().join(" ");
+            screen.set_status(format!("subagent {kind}"));
+            screen.draw(&fullscreen_snapshot(state))?;
+            match crate::subagents::run_subagent(
+                &state.config,
+                providers,
+                state.context.workspace.clone(),
+                kind,
+                &task,
+                false,
+            )
+            .await
+            {
+                Ok(report) => {
+                    state.session.append("subagent_result", &report)?;
+                    state
+                        .session
+                        .append_memory("subagent_result", &report.report)?;
+                    state.transcript.push(ModelMessage {
+                        role: MessageRole::System,
+                        content: format!(
+                            "Subagent `{}` report for `{}`:\n{}",
+                            report.kind, report.task, report.report
+                        ),
+                    });
+                    screen.push_system(format!(
+                        "subagent: {}  tool calls: {}\n{}",
+                        report.kind, report.tool_calls, report.report
+                    ));
+                }
+                Err(error) => screen.push_system(format!("subagent error: {error:#}")),
+            }
+            Ok(false)
+        }
+        "/preview" => {
+            let path = parts.next().unwrap_or("index.html");
+            if state.preview.is_none() {
+                state.preview = Some(PreviewServer::start(state.context.workspace.clone())?);
+            }
+            let url = state.preview.as_ref().unwrap().url_for(path)?;
+            screen.push_system(format!("preview  {url}"));
+            Ok(false)
+        }
+        "/mascot" => {
+            screen.push_system("The ClaudeCodeX activity mascot is shown in line mode and during non-full-screen activity. Full-screen mode keeps the display stable for editing.");
+            Ok(false)
+        }
+        other => {
+            screen.push_system(format!("unknown command `{other}`"));
+            Ok(false)
+        }
+    }
+}
+
+fn should_use_fullscreen() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
 async fn run_user_turn(
@@ -869,6 +1184,76 @@ fn render_header(state: &AgentState) {
         session_short: &session_short,
         mode: state.work_mode.as_str(),
     });
+}
+
+fn fullscreen_snapshot(state: &AgentState) -> FullscreenSnapshot {
+    FullscreenSnapshot {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        provider: state.selected_provider.clone(),
+        model: state.selected_model.clone(),
+        effort: state.current_effort().as_str().to_string(),
+        permissions: state.config.permission_profile.clone(),
+        mode: state.work_mode.as_str().to_string(),
+        workspace: state.context.workspace.display().to_string(),
+        branch: git_branch(&state.context.workspace),
+        repo_state: git_repo_state(&state.context.workspace),
+        session: short_session_id(state),
+        context_files: state.context.instruction_files.len(),
+    }
+}
+
+fn fullscreen_help() -> &'static str {
+    r#"Session
+  /session       show session path
+  /compact       compact context
+  /plan          turn plan mode on, off, or show status
+  /approve       implement the pending plan
+  /reject        discard the pending plan
+  /clear         clear visible transcript
+  /exit          quit
+
+Model
+  /model         show or switch model
+  /effort        show or set effort
+  /providers     list providers
+
+Workspace
+  /context       show loaded instructions
+  /status        show git status
+  /review        review current git diff
+  /diff          show git diff
+  /preview       serve a file locally
+  /skills        list reusable workflow skills
+  /subagent      run helper subagent
+
+Keys
+  Enter submit, Esc clear input or exit when empty, Ctrl+C exit, arrows move/scroll"#
+}
+
+fn run_ccx_command(workspace: &PathBuf, args: &[&str]) -> String {
+    let Ok(exe) = std::env::current_exe() else {
+        return "current executable unavailable".to_string();
+    };
+    let Ok(output) = Command::new(exe).args(args).current_dir(workspace).output() else {
+        return format!("failed to run ccx {}", args.join(" "));
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut combined = String::new();
+    if !stdout.trim().is_empty() {
+        combined.push_str(stdout.trim_end());
+    }
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(stderr.trim_end());
+    }
+    if combined.is_empty() {
+        format!("ccx {} exited {}", args.join(" "), output.status)
+    } else {
+        combined
+    }
 }
 
 fn render_footer(state: &AgentState) {

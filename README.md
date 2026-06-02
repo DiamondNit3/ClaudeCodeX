@@ -6,7 +6,7 @@ ClaudeCodeX (`ccx`) is a terminal-only agentic coding harness inspired by Claude
 
 This repository contains the first Rust implementation pass:
 
-- interactive terminal loop
+- full-screen interactive terminal loop with a line-mode fallback for piped sessions
 - non-interactive `exec` mode
 - configurable provider/model routing
 - unified effort controls for low, medium, high, and max runs
@@ -18,7 +18,7 @@ This repository contains the first Rust implementation pass:
 - project instruction loading from `AGENTS.md`, `.ccx/AGENTS.md`, `CLAUDE.md`, and `.cursor/rules`
 - JSONL session logging, resume listing, and real context compaction
 - MCP server config and tool visibility plumbing
-- animated terminal mascot and Codex-style boxed input for activity feedback
+- animated terminal mascot and Codex-style full-screen input for activity feedback
 - review mode, approval-gated plan mode, workflow skill discovery, model-backed read-only subagents, background task registry, benchmark smoke checks, and release checks
 - context budgeting, relevant-file hints, auto effort selection, and simple model routing
 - small, transparent base prompt
@@ -44,6 +44,8 @@ ccx bench
 ccx release-check
 ccx doctor
 ```
+
+`ccx` and `ccx interactive` take over the terminal with an alternate-screen interface when launched from a real TTY. Non-interactive commands such as `ccx exec`, `ccx providers`, task workers, and piped sessions stay line-based.
 
 Interactive slash commands include grouped session, model, workspace, and security controls:
 
